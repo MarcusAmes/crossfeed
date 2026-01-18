@@ -1,6 +1,7 @@
 mod http1;
 mod http2;
 mod tls;
+mod socks;
 
 pub use http1::{
     Header, HttpVersion, Limits, ParseError, ParseErrorKind, ParseStatus, ParseWarning,
@@ -18,4 +19,11 @@ pub use http2::{
 pub use tls::{
     build_acceptor, generate_ca, generate_leaf_cert, CaCertificate, CaMaterial,
     CaMaterialPaths, CertCache, LeafCertificate, TlsConfig, TlsError, TlsErrorKind,
+};
+
+pub use socks::{
+    build_handshake_request, build_socks4_connect, build_socks5_connect,
+    parse_handshake_response, parse_socks_response, SocksAddress, SocksAuth, SocksCommand,
+    SocksError, SocksErrorKind, SocksParseStatus, SocksRequest, SocksResponse,
+    SocksResponseParser, SocksReply, SocksVersion,
 };
