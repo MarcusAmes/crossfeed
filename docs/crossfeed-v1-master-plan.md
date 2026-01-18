@@ -100,7 +100,7 @@
 # Milestones
 
 ## Milestone 0: Repo Bootstrap & Conventions
-Status: [ ] Completed
+Status: [x] Completed
 **Goal:** Establish workspace structure, shared crates, and testing scaffolding.
 **Includes:**
 - Workspace layout for core, gui, tui, web-lib, and shared crates.
@@ -113,7 +113,7 @@ Status: [ ] Completed
 ---
 
 ## Milestone 1: Project Format + Storage Schema
-Status: [ ] Completed
+Status: [x] Completed
 **Goal:** Define folder-based project format and SQLite schema.
 **Includes:**
 - Project folder layout (`db.sqlite`, `project.json`, etc.).
@@ -127,7 +127,7 @@ Status: [ ] Completed
 ---
 
 ## Milestone 2: Network Core (crossfeed-net)
-Status: [ ] Completed
+Status: [x] Completed
 **Goal:** Low-level HTTP/TLS foundation for proxy and clients.
 **Includes:**
 - HTTP/1.1 parsing and serialization primitives.
@@ -142,7 +142,7 @@ Status: [ ] Completed
 ---
 
 ## Milestone 3: Proxy Core (HTTP/1.1 + HTTP/2)
-Status: [ ] Completed
+Status: [x] Completed
 **Goal:** Intercepting proxy core with SOCKS upstream.
 **Includes:**
 - HTTP/1.1 + HTTP/2 support.

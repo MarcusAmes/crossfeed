@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod proxy;
 mod scope;
+mod timeline;
 
 pub use config::{
     ListenConfig, ProxyConfig, ScopeConfig, ScopePatternType, ScopeRule, ScopeRuleType, ScopeTarget,
@@ -10,6 +11,7 @@ pub use config::{
 pub use error::ProxyError;
 pub use proxy::Proxy;
 pub use scope::is_in_scope;
+pub use timeline::{spawn_timeline_worker, TimelineEvent, TimelineSink};
 
 #[cfg(test)]
 mod tests {

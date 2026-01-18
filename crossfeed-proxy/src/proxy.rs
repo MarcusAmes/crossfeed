@@ -9,10 +9,14 @@ use crossfeed_net::{
     RequestParser, ResponseParser, SocksAddress, SocksAuth, SocksResponseParser, SocksVersion,
     TlsConfig,
 };
+use crossfeed_storage::{BodyLimits, TimelineInsertResult, TimelineRequest, TimelineResponse, TimelineStore};
 
-use crate::config::{ProxyConfig, SocksAuthConfig, SocksConfig, SocksVersion as ProxySocksVersion, UpstreamMode};
+use crate::config::{
+    ProxyConfig, SocksAuthConfig, SocksConfig, SocksVersion as ProxySocksVersion, UpstreamMode,
+};
 use crate::error::ProxyError;
 use crate::scope::is_in_scope;
+use crate::timeline::{spawn_timeline_worker, TimelineEvent, TimelineSink};
 
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
@@ -24,6 +28,7 @@ struct ProxyState {
     config: ProxyConfig,
     ca: crossfeed_net::CaCertificate,
     cache: Mutex<CertCache>,
+    timeline: TimelineSink,
 }
 
 impl Proxy {
@@ -31,8 +36,35 @@ impl Proxy {
         let ca = generate_ca(&config.tls.ca_common_name)
             .map_err(|err| ProxyError::Config(err.message))?;
         let cache = Mutex::new(CertCache::new(1024));
+        let timeline = spawn_timeline_worker(
+            std::sync::Arc::new(NoopStore),
+            BodyLimits::default(),
+        );
         Ok(Self {
-            state: Arc::new(ProxyState { config, ca, cache }),
+            state: Arc::new(ProxyState {
+                config,
+                ca,
+                cache,
+                timeline,
+            }),
+        })
+    }
+
+    pub fn with_timeline(
+        config: ProxyConfig,
+        store: std::sync::Arc<dyn TimelineStore>,
+    ) -> Result<Self, ProxyError> {
+        let ca = generate_ca(&config.tls.ca_common_name)
+            .map_err(|err| ProxyError::Config(err.message))?;
+        let cache = Mutex::new(CertCache::new(1024));
+        let timeline = spawn_timeline_worker(store, config.body_limits);
+        Ok(Self {
+            state: Arc::new(ProxyState {
+                config,
+                ca,
+                cache,
+                timeline,
+            }),
         })
     }
 
@@ -83,7 +115,6 @@ async fn handle_http1(
     mut buffer: Vec<u8>,
 ) -> Result<(), ProxyError> {
     let mut parser = RequestParser::new();
-    let mut request_bytes = Vec::new();
 
     loop {
         if buffer.is_empty() {
@@ -98,7 +129,6 @@ async fn handle_http1(
             buffer.extend_from_slice(&temp[..n]);
         }
 
-        request_bytes.extend_from_slice(&buffer);
         let status = parser.push(&buffer);
         buffer.clear();
 
@@ -117,7 +147,7 @@ async fn handle_http1(
                 let (host, port, path) = resolve_target(&message.line.target, &message.headers)
                     .ok_or_else(|| ProxyError::Runtime("missing host".to_string()))?;
 
-                let _in_scope = is_in_scope(&state.config.scope.rules, &host, &path);
+                let in_scope = is_in_scope(&state.config.scope.rules, &host, &path);
 
                 let upstream = connect_upstream(&state.config, host.clone(), port).await?;
                 let mut upstream = upstream;
@@ -133,6 +163,17 @@ async fn handle_http1(
                     .write_all(&response_bytes)
                     .await
                     .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+
+                let event = build_timeline_event(
+                    &message,
+                    &response_bytes,
+                    host,
+                    port,
+                    path,
+                    in_scope,
+                );
+                let _ = state.timeline.send(event).await;
+
                 return Ok(());
             }
         }
@@ -168,17 +209,20 @@ async fn handle_http2(
             Http2ParseStatus::Complete { frame, .. } => {
                 if let crossfeed_net::FramePayload::Headers(headers) = frame.payload {
                     let mut authority = None;
-                    for header in headers.headers {
+                    let mut path = None;
+                    for header in headers.headers.iter() {
                         if header.name == b":authority".to_vec() {
                             authority = Some(String::from_utf8_lossy(&header.value).to_string());
-                            break;
+                        }
+                        if header.name == b":path".to_vec() {
+                            path = Some(String::from_utf8_lossy(&header.value).to_string());
                         }
                     }
                     let Some(authority) = authority else {
                         return Err(ProxyError::Runtime("missing :authority".to_string()));
                     };
                     let (host, port) = split_host_port(&authority);
-                    let upstream = connect_upstream(&state.config, host, port).await?;
+                    let upstream = connect_upstream(&state.config, host.clone(), port).await?;
                     let mut upstream = upstream;
                     upstream
                         .write_all(&accumulated)
@@ -188,6 +232,37 @@ async fn handle_http2(
                     tokio::io::copy_bidirectional(&mut client, &mut upstream)
                         .await
                         .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+
+                    let path = path.unwrap_or_else(|| "/".to_string());
+                    let in_scope = is_in_scope(&state.config.scope.rules, &host, &path);
+                    let request = TimelineRequest {
+                        source: "proxy".to_string(),
+                        method: "HTTP2".to_string(),
+                        scheme: "https".to_string(),
+                        host: host.clone(),
+                        port,
+                        path,
+                        query: None,
+                        url: format!("https://{host}"),
+                        http_version: "HTTP/2".to_string(),
+                        request_headers: accumulated.clone(),
+                        request_body: Vec::new(),
+                        request_body_size: 0,
+                        request_body_truncated: false,
+                        started_at: chrono::Utc::now().to_rfc3339(),
+                        completed_at: None,
+                        duration_ms: None,
+                        scope_status_at_capture: if in_scope { "in_scope".to_string() } else { "out_of_scope".to_string() },
+                        scope_status_current: None,
+                        scope_rules_version: 1,
+                        capture_filtered: false,
+                        timeline_filtered: false,
+                    };
+                    let event = TimelineEvent {
+                        request,
+                        response: None,
+                    };
+                    let _ = state.timeline.send(event).await;
                     return Ok(());
                 }
             }
@@ -465,4 +540,88 @@ fn serialize_request(
     bytes.extend_from_slice(b"\r\n");
     bytes.extend_from_slice(&request.body);
     bytes
+}
+
+fn build_timeline_event(
+    request: &crossfeed_net::Request,
+    response_bytes: &[u8],
+    host: String,
+    port: u16,
+    path: String,
+    in_scope: bool,
+) -> TimelineEvent {
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let scope_status = if in_scope { "in_scope" } else { "out_of_scope" };
+    let timeline_request = TimelineRequest {
+        source: "proxy".to_string(),
+        method: request.line.method.clone(),
+        scheme: "http".to_string(),
+        host,
+        port,
+        path: path.clone(),
+        query: None,
+        url: format!("http://{}{}", request.line.target, path),
+        http_version: match request.line.version {
+            crossfeed_net::HttpVersion::Http10 => "HTTP/1.0".to_string(),
+            crossfeed_net::HttpVersion::Http11 => "HTTP/1.1".to_string(),
+            crossfeed_net::HttpVersion::Other(ref other) => other.to_string(),
+        },
+        request_headers: serialize_request(request, &path, ""),
+        request_body: request.body.clone(),
+        request_body_size: request.body.len(),
+        request_body_truncated: false,
+        started_at: started_at.clone(),
+        completed_at: None,
+        duration_ms: None,
+        scope_status_at_capture: scope_status.to_string(),
+        scope_status_current: None,
+        scope_rules_version: 1,
+        capture_filtered: false,
+        timeline_filtered: false,
+    };
+
+    let timeline_response = parse_response(response_bytes, &started_at);
+    TimelineEvent {
+        request: timeline_request,
+        response: timeline_response,
+    }
+}
+
+fn parse_response(response_bytes: &[u8], received_at: &str) -> Option<TimelineResponse> {
+    let mut parser = ResponseParser::new();
+    let status = parser.push(response_bytes);
+    let crossfeed_net::ParseStatus::Complete { message, .. } = status else {
+        return None;
+    };
+
+    let body = message.body;
+    let body_size = body.len();
+
+    Some(TimelineResponse {
+        timeline_request_id: 0,
+        status_code: message.line.status_code,
+        reason: Some(message.line.reason),
+        response_headers: response_bytes.to_vec(),
+        response_body: body,
+        response_body_size: body_size,
+        response_body_truncated: false,
+        http_version: match message.line.version {
+            crossfeed_net::HttpVersion::Http10 => "HTTP/1.0".to_string(),
+            crossfeed_net::HttpVersion::Http11 => "HTTP/1.1".to_string(),
+            crossfeed_net::HttpVersion::Other(ref other) => other.to_string(),
+        },
+        received_at: received_at.to_string(),
+    })
+}
+
+struct NoopStore;
+
+impl TimelineStore for NoopStore {
+    fn insert_request(&self, _request: TimelineRequest) -> Result<TimelineInsertResult, String> {
+        Ok(TimelineInsertResult { request_id: 0 })
+    }
+
+    fn insert_response(&self, _response: TimelineResponse) -> Result<(), String> {
+        Ok(())
+    }
 }

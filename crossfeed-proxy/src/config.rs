@@ -1,3 +1,4 @@
+use crossfeed_storage::BodyLimits;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -6,6 +7,7 @@ pub struct ProxyConfig {
     pub tls: TlsMitmConfig,
     pub upstream: UpstreamConfig,
     pub scope: ScopeConfig,
+    pub body_limits: BodyLimits,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,6 +105,7 @@ impl Default for ProxyConfig {
                 socks: None,
             },
             scope: ScopeConfig { rules: Vec::new() },
+            body_limits: BodyLimits::default(),
         }
     }
 }

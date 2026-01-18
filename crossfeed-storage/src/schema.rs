@@ -58,6 +58,7 @@ impl SchemaCatalog {
     request_headers BLOB NOT NULL,\
     request_body BLOB,\
     request_body_size INTEGER NOT NULL DEFAULT 0,\
+    request_body_truncated INTEGER NOT NULL DEFAULT 0,\
     started_at TEXT NOT NULL,\
     completed_at TEXT,\
     duration_ms INTEGER,\
@@ -93,6 +94,7 @@ impl SchemaCatalog {
     response_headers BLOB NOT NULL,\
     response_body BLOB,\
     response_body_size INTEGER NOT NULL DEFAULT 0,\
+    response_body_truncated INTEGER NOT NULL DEFAULT 0,\
     http_version TEXT NOT NULL,\
     received_at TEXT NOT NULL\
 )"

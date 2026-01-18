@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 crossfeed-net = { path = "../crossfeed-net" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+crossfeed-storage = { path = "../crossfeed-storage" }
 openssl = { version = "0.10", features = ["vendored"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
