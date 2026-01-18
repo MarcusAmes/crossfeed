@@ -9,14 +9,15 @@ use crossfeed_net::{
     RequestParser, ResponseParser, SocksAddress, SocksAuth, SocksResponseParser, SocksVersion,
     TlsConfig,
 };
-use crossfeed_storage::{BodyLimits, TimelineInsertResult, TimelineRequest, TimelineResponse, TimelineStore};
+use crossfeed_storage::{TimelineRequest, TimelineResponse};
 
 use crate::config::{
     ProxyConfig, SocksAuthConfig, SocksConfig, SocksVersion as ProxySocksVersion, UpstreamMode,
 };
 use crate::error::ProxyError;
 use crate::scope::is_in_scope;
-use crate::timeline::{spawn_timeline_worker, TimelineEvent, TimelineSink};
+use crate::events::{event_channel, ProxyEvents};
+use crate::timeline_event::TimelineEvent;
 
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
@@ -28,44 +29,26 @@ struct ProxyState {
     config: ProxyConfig,
     ca: crossfeed_net::CaCertificate,
     cache: Mutex<CertCache>,
-    timeline: TimelineSink,
+    sender: tokio::sync::mpsc::Sender<TimelineEvent>,
 }
 
 impl Proxy {
-    pub fn new(config: ProxyConfig) -> Result<Self, ProxyError> {
+    pub fn new(config: ProxyConfig) -> Result<(Self, ProxyEvents), ProxyError> {
         let ca = generate_ca(&config.tls.ca_common_name)
             .map_err(|err| ProxyError::Config(err.message))?;
         let cache = Mutex::new(CertCache::new(1024));
-        let timeline = spawn_timeline_worker(
-            std::sync::Arc::new(NoopStore),
-            BodyLimits::default(),
-        );
-        Ok(Self {
-            state: Arc::new(ProxyState {
-                config,
-                ca,
-                cache,
-                timeline,
-            }),
-        })
-    }
-
-    pub fn with_timeline(
-        config: ProxyConfig,
-        store: std::sync::Arc<dyn TimelineStore>,
-    ) -> Result<Self, ProxyError> {
-        let ca = generate_ca(&config.tls.ca_common_name)
-            .map_err(|err| ProxyError::Config(err.message))?;
-        let cache = Mutex::new(CertCache::new(1024));
-        let timeline = spawn_timeline_worker(store, config.body_limits);
-        Ok(Self {
-            state: Arc::new(ProxyState {
-                config,
-                ca,
-                cache,
-                timeline,
-            }),
-        })
+        let (sender, events) = event_channel();
+        Ok((
+            Self {
+                state: Arc::new(ProxyState {
+                    config,
+                    ca,
+                    cache,
+                    sender,
+                }),
+            },
+            events,
+        ))
     }
 
     pub async fn run(&self) -> Result<(), ProxyError> {
@@ -172,7 +155,8 @@ async fn handle_http1(
                     path,
                     in_scope,
                 );
-                let _ = state.timeline.send(event).await;
+                    let _ = state.sender.send(event).await;
+
 
                 return Ok(());
             }
@@ -262,7 +246,8 @@ async fn handle_http2(
                         request,
                         response: None,
                     };
-                    let _ = state.timeline.send(event).await;
+                let _ = state.sender.send(event).await;
+
                     return Ok(());
                 }
             }
@@ -614,14 +599,3 @@ fn parse_response(response_bytes: &[u8], received_at: &str) -> Option<TimelineRe
     })
 }
 
-struct NoopStore;
-
-impl TimelineStore for NoopStore {
-    fn insert_request(&self, _request: TimelineRequest) -> Result<TimelineInsertResult, String> {
-        Ok(TimelineInsertResult { request_id: 0 })
-    }
-
-    fn insert_response(&self, _response: TimelineResponse) -> Result<(), String> {
-        Ok(())
-    }
-}

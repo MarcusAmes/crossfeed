@@ -1,17 +1,19 @@
 mod config;
 mod error;
+mod events;
 mod proxy;
 mod scope;
-mod timeline;
+mod timeline_event;
 
 pub use config::{
     ListenConfig, ProxyConfig, ScopeConfig, ScopePatternType, ScopeRule, ScopeRuleType, ScopeTarget,
     SocksAuthConfig, SocksConfig, SocksVersion, TlsMitmConfig, UpstreamConfig, UpstreamMode,
 };
 pub use error::ProxyError;
+pub use events::{event_channel, ProxyEvents};
 pub use proxy::Proxy;
 pub use scope::is_in_scope;
-pub use timeline::{spawn_timeline_worker, TimelineEvent, TimelineSink};
+pub use timeline_event::TimelineEvent;
 
 #[cfg(test)]
 mod tests {
