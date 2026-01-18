@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+hpack = "0.3"
 twoway = "0.2"
 
 [lints]
