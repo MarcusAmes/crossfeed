@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+twoway = "0.2"
 
 [lints]
 workspace = true
