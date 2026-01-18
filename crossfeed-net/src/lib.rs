@@ -10,8 +10,8 @@ pub use http1::{
 };
 
 pub use http2::{
-    DataFrame, Frame, FrameHeader, FrameType, GoAwayFrame, HeaderField, HeadersFrame,
-    Http2Error, Http2ErrorKind, Http2ParseStatus, Http2Parser, Http2Warning,
+    DataFrame, Frame, FrameHeader, FramePayload, FrameType, GoAwayFrame, HeaderField,
+    HeadersFrame, Http2Error, Http2ErrorKind, Http2ParseStatus, Http2Parser, Http2Warning,
     Http2WarningKind, HpackDecoder, HpackEncoder, PingFrame, PriorityFrame, RstStreamFrame,
     SettingsFrame, WindowUpdateFrame,
 };
