@@ -156,7 +156,7 @@ Status: [x] Completed
 ---
 
 ## Milestone 4: Web Library (Rust Only)
-Status: [ ] Completed
+Status: [x] Completed
 **Goal:** Build the custom async web client crate used by Crossfeed.
 **Includes:**
 - `request`, `request_batch`, `request_custom_batch`, `download`.
