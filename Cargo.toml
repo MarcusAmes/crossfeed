@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crossfeed-core",
+    "crossfeed-gui",
+    "crossfeed-proxy",
+    "crossfeed-storage",
+    "crossfeed-tui",
+    "crossfeed-web",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unused_crate_dependencies = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
