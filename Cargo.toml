@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crossfeed-core",
-    "crossfeed-gui",
+    "crossfeed-gui", "crossfeed-net",
     "crossfeed-proxy",
     "crossfeed-storage",
     "crossfeed-tui",
