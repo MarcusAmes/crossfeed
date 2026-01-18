@@ -58,19 +58,19 @@ pub struct TimelineInsertResult {
     pub request_id: i64,
 }
 
-pub trait TimelineStore: Send + Sync {
+pub trait TimelineStore: Send {
     fn insert_request(&self, request: TimelineRequest) -> Result<TimelineInsertResult, String>;
     fn insert_response(&self, response: TimelineResponse) -> Result<(), String>;
 }
 
 #[derive(Clone)]
 pub struct TimelineRecorder {
-    store: std::sync::Arc<dyn TimelineStore>,
+    store: std::sync::Arc<dyn TimelineStore + Send + Sync>,
     limits: BodyLimits,
 }
 
 impl TimelineRecorder {
-    pub fn new(store: std::sync::Arc<dyn TimelineStore>, limits: BodyLimits) -> Self {
+    pub fn new(store: std::sync::Arc<dyn TimelineStore + Send + Sync>, limits: BodyLimits) -> Self {
         Self { store, limits }
     }
 
