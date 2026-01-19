@@ -10,6 +10,10 @@ use crossfeed_storage::{ProjectLayout, ProjectPaths, SqliteStore};
 struct Cli {
     #[arg(long = "proxy-dir")]
     proxy_dir: PathBuf,
+    #[arg(long = "request-body-limit-mb", default_value_t = 40)]
+    request_body_limit_mb: usize,
+    #[arg(long = "response-body-limit-mb", default_value_t = 40)]
+    response_body_limit_mb: usize,
 }
 
 #[tokio::main]
@@ -28,7 +32,11 @@ async fn main() -> Result<(), String> {
     ensure_dir(&leaf_dir)?;
 
     let store = SqliteStore::open(&paths.database)?;
-    let ingest = IngestHandle::new(Box::new(store), crossfeed_storage::BodyLimits::default());
+    let limits = crossfeed_storage::BodyLimits {
+        request_max_bytes: cli.request_body_limit_mb * 1024 * 1024,
+        response_max_bytes: cli.response_body_limit_mb * 1024 * 1024,
+    };
+    let ingest = IngestHandle::new(Box::new(store), limits);
 
     let mut proxy_config = ProxyConfig::default();
     proxy_config.tls.ca_cert_dir = certs_dir.to_string_lossy().into_owned();

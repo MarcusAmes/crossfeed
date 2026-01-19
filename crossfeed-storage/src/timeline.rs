@@ -47,8 +47,8 @@ pub struct BodyLimits {
 impl Default for BodyLimits {
     fn default() -> Self {
         Self {
-            request_max_bytes: 5 * 1024 * 1024,
-            response_max_bytes: 20 * 1024 * 1024,
+            request_max_bytes: 40 * 1024 * 1024,
+            response_max_bytes: 40 * 1024 * 1024,
         }
     }
 }

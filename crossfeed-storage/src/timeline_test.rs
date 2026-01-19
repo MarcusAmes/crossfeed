@@ -2,21 +2,23 @@ use crate::timeline::{
     BodyLimits, TimelineRecorder, TimelineRequest, TimelineResponse, TimelineStore,
 };
 
+use std::sync::{Arc, Mutex};
+
 struct MockStore {
-    last_request: std::sync::Mutex<Option<TimelineRequest>>,
-    last_response: std::sync::Mutex<Option<TimelineResponse>>,
+    last_request: Mutex<Option<TimelineRequest>>,
+    last_response: Mutex<Option<TimelineResponse>>,
 }
 
 impl MockStore {
-    fn new() -> Self {
-        Self {
-            last_request: std::sync::Mutex::new(None),
-            last_response: std::sync::Mutex::new(None),
-        }
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            last_request: Mutex::new(None),
+            last_response: Mutex::new(None),
+        })
     }
 }
 
-impl TimelineStore for MockStore {
+impl TimelineStore for Arc<MockStore> {
     fn insert_request(
         &self,
         request: TimelineRequest,
@@ -34,8 +36,8 @@ impl TimelineStore for MockStore {
 #[test]
 fn body_limits_default() {
     let limits = BodyLimits::default();
-    assert_eq!(limits.request_max_bytes, 5 * 1024 * 1024);
-    assert_eq!(limits.response_max_bytes, 20 * 1024 * 1024);
+    assert_eq!(limits.request_max_bytes, 40 * 1024 * 1024);
+    assert_eq!(limits.response_max_bytes, 40 * 1024 * 1024);
 }
 
 #[test]
@@ -71,12 +73,12 @@ fn mock_store_captures_requests() {
 
 #[test]
 fn recorder_truncates_request_body() {
-    let store = std::sync::Arc::new(MockStore::new());
+    let store = MockStore::new();
     let limits = BodyLimits {
         request_max_bytes: 4,
         response_max_bytes: 10,
     };
-    let recorder = TimelineRecorder::new(store.clone(), limits);
+    let recorder = TimelineRecorder::new(Box::new(store.clone()), limits);
     let request = TimelineRequest {
         source: "proxy".to_string(),
         method: "POST".to_string(),
@@ -129,12 +131,12 @@ fn mock_store_captures_response() {
 
 #[test]
 fn recorder_truncates_response_body() {
-    let store = std::sync::Arc::new(MockStore::new());
+    let store = MockStore::new();
     let limits = BodyLimits {
         request_max_bytes: 4,
         response_max_bytes: 5,
     };
-    let recorder = TimelineRecorder::new(store.clone(), limits);
+    let recorder = TimelineRecorder::new(Box::new(store.clone()), limits);
     let response = TimelineResponse {
         timeline_request_id: 42,
         status_code: 200,

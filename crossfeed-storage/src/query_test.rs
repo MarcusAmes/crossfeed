@@ -5,14 +5,14 @@ use crate::{
     TimelineStore,
 };
 
-fn sample_request(url: &str) -> TimelineRequest {
+fn sample_request(url: &str, path: &str, method: &str, source: &str) -> TimelineRequest {
     TimelineRequest {
-        source: "proxy".to_string(),
-        method: "GET".to_string(),
+        source: source.to_string(),
+        method: method.to_string(),
         scheme: "http".to_string(),
         host: "example.com".to_string(),
         port: 80,
-        path: "/".to_string(),
+        path: path.to_string(),
         query: Some("a=1".to_string()),
         url: url.to_string(),
         http_version: "HTTP/1.1".to_string(),
@@ -31,10 +31,10 @@ fn sample_request(url: &str) -> TimelineRequest {
     }
 }
 
-fn sample_response(request_id: i64) -> TimelineResponse {
+fn sample_response(request_id: i64, status_code: u16) -> TimelineResponse {
     TimelineResponse {
         timeline_request_id: request_id,
-        status_code: 200,
+        status_code,
         reason: Some("OK".to_string()),
         response_headers: b"Content-Length: 0\r\n".to_vec(),
         response_body: b"response body".to_vec(),
@@ -59,10 +59,15 @@ fn fts_search_finds_request() {
     let store = SqliteStore::open_with_config(file.path(), config).unwrap();
 
     let id = store
-        .insert_request(sample_request("http://example.com/one"))
+        .insert_request(sample_request(
+            "http://example.com/one",
+            "/one",
+            "GET",
+            "proxy",
+        ))
         .unwrap()
         .request_id;
-    store.insert_response(sample_response(id)).unwrap();
+    store.insert_response(sample_response(id, 200)).unwrap();
 
     let query = TimelineQuery {
         search: Some("response".to_string()),
@@ -72,4 +77,174 @@ fn fts_search_finds_request() {
         .query_requests(&query, TimelineSort::StartedAtDesc)
         .unwrap();
     assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn query_filters_by_path_variants() {
+    let file = NamedTempFile::new().unwrap();
+    let store = SqliteStore::open(file.path()).unwrap();
+
+    let first_id = store
+        .insert_request(sample_request(
+            "http://example.com/api/v1/users",
+            "/api/v1/users",
+            "GET",
+            "proxy",
+        ))
+        .unwrap()
+        .request_id;
+    store
+        .insert_response(sample_response(first_id, 200))
+        .unwrap();
+
+    let second_id = store
+        .insert_request(sample_request(
+            "http://example.com/admin",
+            "/admin",
+            "GET",
+            "proxy",
+        ))
+        .unwrap()
+        .request_id;
+    store
+        .insert_response(sample_response(second_id, 200))
+        .unwrap();
+
+    let exact_query = TimelineQuery {
+        path_exact: Some("/admin".to_string()),
+        ..TimelineQuery::default()
+    };
+    let exact_results = store
+        .query_requests(&exact_query, TimelineSort::StartedAtDesc)
+        .unwrap();
+    assert_eq!(exact_results.len(), 1);
+    assert_eq!(exact_results[0].path, "/admin");
+
+    let prefix_query = TimelineQuery {
+        path_prefix: Some("/api".to_string()),
+        ..TimelineQuery::default()
+    };
+    let prefix_results = store
+        .query_requests(&prefix_query, TimelineSort::StartedAtDesc)
+        .unwrap();
+    assert_eq!(prefix_results.len(), 1);
+    assert_eq!(prefix_results[0].path, "/api/v1/users");
+
+    let contains_query = TimelineQuery {
+        path_contains: Some("v1".to_string()),
+        ..TimelineQuery::default()
+    };
+    let contains_results = store
+        .query_requests(&contains_query, TimelineSort::StartedAtDesc)
+        .unwrap();
+    assert_eq!(contains_results.len(), 1);
+    assert_eq!(contains_results[0].path, "/api/v1/users");
+}
+
+#[test]
+fn query_filters_by_status_and_excludes_missing() {
+    let file = NamedTempFile::new().unwrap();
+    let store = SqliteStore::open(file.path()).unwrap();
+
+    let first_id = store
+        .insert_request(sample_request(
+            "http://example.com/ok",
+            "/ok",
+            "GET",
+            "proxy",
+        ))
+        .unwrap()
+        .request_id;
+    store
+        .insert_response(sample_response(first_id, 200))
+        .unwrap();
+
+    store
+        .insert_request(sample_request(
+            "http://example.com/pending",
+            "/pending",
+            "GET",
+            "proxy",
+        ))
+        .unwrap();
+
+    let query = TimelineQuery {
+        status: Some(200),
+        ..TimelineQuery::default()
+    };
+    let results = store
+        .query_requests(&query, TimelineSort::StartedAtDesc)
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].path, "/ok");
+}
+
+#[test]
+fn query_filters_by_source_and_tags_any() {
+    let file = NamedTempFile::new().unwrap();
+    let store = SqliteStore::open(file.path()).unwrap();
+
+    let first_id = store
+        .insert_request(sample_request(
+            "http://example.com/proxy",
+            "/proxy",
+            "GET",
+            "proxy",
+        ))
+        .unwrap()
+        .request_id;
+    store
+        .insert_response(sample_response(first_id, 200))
+        .unwrap();
+    store.add_tags(first_id, &["critical", "auth"]).unwrap();
+
+    let second_id = store
+        .insert_request(sample_request(
+            "http://example.com/replay",
+            "/replay",
+            "POST",
+            "replay",
+        ))
+        .unwrap()
+        .request_id;
+    store
+        .insert_response(sample_response(second_id, 201))
+        .unwrap();
+    store.add_tags(second_id, &["baseline"]).unwrap();
+
+    let query = TimelineQuery {
+        source: Some("proxy".to_string()),
+        tags_any: vec!["auth".to_string(), "missing".to_string()],
+        ..TimelineQuery::default()
+    };
+    let results = store
+        .query_requests(&query, TimelineSort::StartedAtDesc)
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].path, "/proxy");
+}
+
+#[test]
+fn query_applies_pagination_and_sorting() {
+    let file = NamedTempFile::new().unwrap();
+    let store = SqliteStore::open(file.path()).unwrap();
+
+    for (idx, path) in ["/first", "/second", "/third"].iter().enumerate() {
+        let mut request =
+            sample_request(&format!("http://example.com{path}"), path, "GET", "proxy");
+        request.started_at = format!("2024-01-01T00:00:0{}Z", idx);
+        let id = store.insert_request(request).unwrap().request_id;
+        store.insert_response(sample_response(id, 200)).unwrap();
+    }
+
+    let query = TimelineQuery {
+        limit: 1,
+        offset: 1,
+        ..TimelineQuery::default()
+    };
+    let results = store
+        .query_requests(&query, TimelineSort::StartedAtAsc)
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].path, "/second");
 }

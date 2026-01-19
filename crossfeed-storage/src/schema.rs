@@ -82,6 +82,7 @@ impl SchemaCatalog {
                         "CREATE INDEX idx_timeline_requests_scope_current ON timeline_requests(scope_status_current)"
                             .to_string(),
                         "CREATE INDEX idx_timeline_requests_url ON timeline_requests(url)".to_string(),
+                        "CREATE INDEX idx_timeline_requests_path ON timeline_requests(path)".to_string(),
                     ],
                 },
                 TableSpec {

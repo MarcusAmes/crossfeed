@@ -208,6 +208,24 @@ impl SqliteStore {
             .map_err(|err| err.to_string())?;
         Ok(())
     }
+
+    fn ensure_tag_id(&self, name: &str) -> Result<i64, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM tags WHERE name = ?1")
+            .map_err(|err| err.to_string())?;
+        let existing = stmt
+            .query_row([name], |row| row.get::<_, i64>(0))
+            .optional()
+            .map_err(|err| err.to_string())?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+        self.conn
+            .execute("INSERT INTO tags (name) VALUES (?1)", [name])
+            .map_err(|err| err.to_string())?;
+        Ok(self.conn.last_insert_rowid())
+    }
 }
 
 impl TimelineStore for SqliteStore {
@@ -222,17 +240,31 @@ impl TimelineStore for SqliteStore {
 }
 
 impl SqliteStore {
+    pub fn add_tags(&self, request_id: i64, tags: &[&str]) -> Result<(), String> {
+        for tag in tags {
+            let tag_id = self.ensure_tag_id(tag)?;
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO timeline_request_tags (timeline_request_id, tag_id) VALUES (?1, ?2)",
+                    params![request_id, tag_id],
+                )
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    }
+
     pub fn query_requests(
         &self,
         query: &TimelineQuery,
         sort: TimelineSort,
     ) -> Result<Vec<TimelineRequest>, String> {
         let mut sql = String::from(
-            "SELECT source.name, req.method, req.scheme, req.host, req.port, req.path, req.query, req.url, req.http_version, req.request_headers, req.request_body, req.request_body_size, req.request_body_truncated, req.started_at, req.completed_at, req.duration_ms, req.scope_status_at_capture, req.scope_status_current, req.scope_rules_version, req.capture_filtered, req.timeline_filtered FROM timeline_requests req JOIN timeline_sources source ON req.source_id = source.id",
+            "SELECT DISTINCT source.name, req.method, req.scheme, req.host, req.port, req.path, req.query, req.url, req.http_version, req.request_headers, req.request_body, req.request_body_size, req.request_body_truncated, req.started_at, req.completed_at, req.duration_ms, req.scope_status_at_capture, req.scope_status_current, req.scope_rules_version, req.capture_filtered, req.timeline_filtered FROM timeline_requests req JOIN timeline_sources source ON req.source_id = source.id",
         );
         let mut where_clauses = Vec::new();
         let mut params: Vec<rusqlite::types::Value> = Vec::new();
         let mut join_responses = false;
+        let mut join_tags = false;
 
         if let Some(host) = &query.host {
             where_clauses.push("req.host = ?".to_string());
@@ -255,6 +287,36 @@ impl SqliteStore {
             where_clauses.push("source.name = ?".to_string());
             params.push(source.clone().into());
         }
+        if let Some(path_exact) = &query.path_exact {
+            where_clauses.push("req.path = ?".to_string());
+            params.push(path_exact.clone().into());
+        }
+        if let Some(path_prefix) = &query.path_prefix {
+            if query.path_case_sensitive {
+                where_clauses.push("req.path LIKE ?".to_string());
+                params.push(format!("{path_prefix}%").into());
+            } else {
+                where_clauses.push("LOWER(req.path) LIKE LOWER(?)".to_string());
+                params.push(format!("{path_prefix}%").into());
+            }
+        }
+        if let Some(path_contains) = &query.path_contains {
+            if query.path_case_sensitive {
+                where_clauses.push("req.path LIKE ?".to_string());
+                params.push(format!("%{path_contains}%").into());
+            } else {
+                where_clauses.push("LOWER(req.path) LIKE LOWER(?)".to_string());
+                params.push(format!("%{path_contains}%").into());
+            }
+        }
+        if !query.tags_any.is_empty() {
+            join_tags = true;
+            let placeholders = vec!["?"; query.tags_any.len()].join(", ");
+            where_clauses.push(format!("tag.name IN ({placeholders})"));
+            for tag in &query.tags_any {
+                params.push(tag.clone().into());
+            }
+        }
         if let Some(since) = &query.since {
             where_clauses.push("req.started_at >= ?".to_string());
             params.push(since.clone().into());
@@ -272,6 +334,12 @@ impl SqliteStore {
 
         if join_responses {
             sql.push_str(" LEFT JOIN timeline_responses resp ON resp.timeline_request_id = req.id");
+        }
+        if join_tags {
+            sql.push_str(
+                " JOIN timeline_request_tags req_tag ON req_tag.timeline_request_id = req.id",
+            );
+            sql.push_str(" JOIN tags tag ON tag.id = req_tag.tag_id");
         }
 
         if !where_clauses.is_empty() {
