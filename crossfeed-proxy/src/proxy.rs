@@ -346,14 +346,6 @@ where
         scope_status,
         started_at.clone(),
     );
-    eprintln!(
-        "[proxy][debug] http1 request parsed method={} host={} port={} path={} bytes={}",
-        message.line.method,
-        host,
-        port,
-        path,
-        request_bytes.len()
-    );
     let proxy_request = ProxyRequest {
         id: request_id,
         timeline: timeline_request.clone(),
@@ -379,10 +371,6 @@ where
 
             let response_bytes = match upstream.as_mut() {
                 Some(upstream) => {
-                    eprintln!(
-                        "[proxy][debug] writing {} bytes to upstream",
-                        proxy_request.raw_request.len()
-                    );
                     upstream
                         .write_all(&proxy_request.raw_request)
                         .await
@@ -391,15 +379,10 @@ where
                         .flush()
                         .await
                         .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    eprintln!("[proxy][debug] upstream write complete, reading response");
                     read_response_stream(upstream).await?
                 }
                 None => {
                     let mut upstream = connect_upstream(&state.config, host.clone(), port).await?;
-                    eprintln!(
-                        "[proxy][debug] writing {} bytes to upstream",
-                        proxy_request.raw_request.len()
-                    );
                     upstream
                         .write_all(&proxy_request.raw_request)
                         .await
@@ -408,7 +391,6 @@ where
                         .flush()
                         .await
                         .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    eprintln!("[proxy][debug] upstream write complete, reading response");
                     read_response_stream(&mut upstream).await?
                 }
             };
@@ -457,10 +439,6 @@ where
 
             let response_bytes = match upstream.as_mut() {
                 Some(upstream) => {
-                    eprintln!(
-                        "[proxy][debug] writing {} bytes to upstream",
-                        proxy_request.raw_request.len()
-                    );
                     upstream
                         .write_all(&proxy_request.raw_request)
                         .await
@@ -469,15 +447,10 @@ where
                         .flush()
                         .await
                         .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    eprintln!("[proxy][debug] upstream write complete, reading response");
                     read_response_stream(upstream).await?
                 }
                 None => {
                     let mut upstream = connect_upstream(&state.config, host.clone(), port).await?;
-                    eprintln!(
-                        "[proxy][debug] writing {} bytes to upstream",
-                        proxy_request.raw_request.len()
-                    );
                     upstream
                         .write_all(&proxy_request.raw_request)
                         .await
@@ -486,7 +459,6 @@ where
                         .flush()
                         .await
                         .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    eprintln!("[proxy][debug] upstream write complete, reading response");
                     read_response_stream(&mut upstream).await?
                 }
             };
@@ -513,10 +485,6 @@ where
 
         match response_intercept {
             InterceptResult::Forward(proxy_response) => {
-                eprintln!(
-                    "[proxy][debug] forwarding response {} bytes to client",
-                    proxy_response.raw_response.len()
-                );
                 client
                     .write_all(&proxy_response.raw_response)
                     .await
@@ -548,10 +516,6 @@ where
                     .map_err(|_| ProxyError::Runtime("response intercept closed".to_string()))?;
                 match decision {
                     InterceptDecision::Allow(proxy_response) => {
-                        eprintln!(
-                            "[proxy][debug] forwarding response {} bytes to client",
-                            proxy_response.raw_response.len()
-                        );
                         client
                             .write_all(&proxy_response.raw_response)
                             .await
@@ -794,23 +758,18 @@ where
     loop {
         let n = stream.read(&mut buffer).await?;
         if n == 0 {
-            eprintln!("[proxy][debug] upstream read 0 bytes (closed)");
             break;
         }
         response.extend_from_slice(&buffer[..n]);
-        eprintln!("[proxy][debug] upstream read {} bytes", n);
         match parser.push(&buffer[..n]) {
             crossfeed_net::ParseStatus::NeedMore { .. } => {
-                eprintln!("[proxy][debug] response parse status: need more");
                 continue;
             }
             crossfeed_net::ParseStatus::Complete { .. } => {
-                eprintln!("[proxy][debug] response parse status: complete");
                 break;
             }
             crossfeed_net::ParseStatus::Error { error, .. } => {
                 if matches!(error.kind, crossfeed_net::ParseErrorKind::UnexpectedEof) {
-                    eprintln!("[proxy][debug] response parse status: eof (need more)");
                     continue;
                 }
                 return Err(ProxyError::Runtime(format!(
@@ -877,9 +836,7 @@ fn serialize_request(request: &crossfeed_net::Request, path: &str, host: &str) -
         if header.name.eq_ignore_ascii_case("host") {
             has_host = true;
         }
-        if header.name.eq_ignore_ascii_case("proxy-connection")
-            || header.name.eq_ignore_ascii_case("connection")
-        {
+        if header.name.eq_ignore_ascii_case("proxy-connection") {
             continue;
         }
         bytes.extend_from_slice(header.raw_name.as_bytes());
@@ -890,7 +847,6 @@ fn serialize_request(request: &crossfeed_net::Request, path: &str, host: &str) -
     if !has_host {
         bytes.extend_from_slice(format!("Host: {}\r\n", host).as_bytes());
     }
-    bytes.extend_from_slice(b"Connection: close\r\n");
     bytes.extend_from_slice(b"\r\n");
     bytes.extend_from_slice(&request.body);
     bytes
