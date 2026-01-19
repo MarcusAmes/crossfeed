@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use http::{HeaderMap, HeaderValue};
-use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use crate::rate_limit::RateLimiter;
 use crate::request::Request;
@@ -65,7 +65,10 @@ impl Client {
             let result = self.execute(request.clone()).await;
             match result {
                 Ok(response) => {
-                    if self.config.retry.retry_on_5xx && response.status >= 500 && attempt < self.config.retry.max_retries {
+                    if self.config.retry.retry_on_5xx
+                        && response.status >= 500
+                        && attempt < self.config.retry.max_retries
+                    {
                         let delay = self.config.retry.next_delay(attempt);
                         tokio::time::sleep(delay).await;
                         attempt += 1;
@@ -89,16 +92,34 @@ impl Client {
     async fn execute(&self, request: Request) -> Result<Response, String> {
         let uri = request.uri.clone();
         let host = uri.host().ok_or("missing host")?.to_string();
-        let port = uri.port_u16().unwrap_or_else(|| if uri.scheme_str() == Some("https") { 443 } else { 80 });
+        let port = uri.port_u16().unwrap_or_else(|| {
+            if uri.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            }
+        });
 
-        let mut stream = TcpStream::connect((host.as_str(), port)).await.map_err(|err| err.to_string())?;
-        let request_bytes = serialize_request(&request, &host, uri.path_and_query().map(|v| v.as_str()).unwrap_or("/"));
-        stream.write_all(&request_bytes).await.map_err(|err| err.to_string())?;
+        let mut stream = TcpStream::connect((host.as_str(), port))
+            .await
+            .map_err(|err| err.to_string())?;
+        let request_bytes = serialize_request(
+            &request,
+            &host,
+            uri.path_and_query().map(|v| v.as_str()).unwrap_or("/"),
+        );
+        stream
+            .write_all(&request_bytes)
+            .await
+            .map_err(|err| err.to_string())?;
 
         let mut buffer = vec![0u8; 8192];
         let mut response_bytes = Vec::new();
         loop {
-            let n = stream.read(&mut buffer).await.map_err(|err| err.to_string())?;
+            let n = stream
+                .read(&mut buffer)
+                .await
+                .map_err(|err| err.to_string())?;
             if n == 0 {
                 break;
             }
@@ -134,7 +155,10 @@ fn parse_response(bytes: &[u8]) -> Result<Response, String> {
     let status_line = lines.next().ok_or("missing status")?;
     let mut status_parts = status_line.split_whitespace();
     status_parts.next();
-    let status = status_parts.next().and_then(|code| code.parse::<u16>().ok()).unwrap_or(0);
+    let status = status_parts
+        .next()
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(0);
 
     let mut headers = HeaderMap::new();
     for line in lines {
@@ -146,5 +170,9 @@ fn parse_response(bytes: &[u8]) -> Result<Response, String> {
         }
     }
 
-    Ok(Response { status, headers, body })
+    Ok(Response {
+        status,
+        headers,
+        body,
+    })
 }

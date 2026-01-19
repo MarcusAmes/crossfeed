@@ -21,6 +21,8 @@ pub struct TlsMitmConfig {
     pub enabled: bool,
     pub allow_legacy: bool,
     pub ca_common_name: String,
+    pub ca_cert_dir: String,
+    pub leaf_cert_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,6 +101,8 @@ impl Default for ProxyConfig {
                 enabled: true,
                 allow_legacy: false,
                 ca_common_name: "Crossfeed Proxy CA".to_string(),
+                ca_cert_dir: "certs".to_string(),
+                leaf_cert_dir: "certs/leaf".to_string(),
             },
             upstream: UpstreamConfig {
                 mode: UpstreamMode::Direct,

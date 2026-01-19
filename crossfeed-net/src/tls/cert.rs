@@ -15,7 +15,9 @@ pub fn generate_leaf_cert(host: &str, ca: &CaCertificate) -> Result<LeafCertific
     if let Ok(ip) = host.parse::<IpAddr>() {
         params.subject_alt_names.push(SanType::IpAddress(ip));
     } else {
-        params.subject_alt_names.push(SanType::DnsName(host.to_string()));
+        params
+            .subject_alt_names
+            .push(SanType::DnsName(host.to_string()));
     }
 
     let cert = Certificate::from_params(params)

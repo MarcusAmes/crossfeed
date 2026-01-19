@@ -35,7 +35,7 @@ impl SchemaCatalog {
             tables: vec![
                 TableSpec {
                     name: "timeline_sources".to_string(),
-                    create_sql: "CREATE TABLE timeline_sources (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS timeline_sources (\
     id INTEGER PRIMARY KEY,\
     name TEXT NOT NULL UNIQUE\
 )"
@@ -44,7 +44,7 @@ impl SchemaCatalog {
                 },
                 TableSpec {
                     name: "timeline_requests".to_string(),
-                    create_sql: "CREATE TABLE timeline_requests (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS timeline_requests (\
     id INTEGER PRIMARY KEY,\
     source_id INTEGER NOT NULL REFERENCES timeline_sources(id),\
     method TEXT NOT NULL,\
@@ -86,7 +86,7 @@ impl SchemaCatalog {
                 },
                 TableSpec {
                     name: "timeline_responses".to_string(),
-                    create_sql: "CREATE TABLE timeline_responses (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS timeline_responses (\
     id INTEGER PRIMARY KEY,\
     timeline_request_id INTEGER NOT NULL REFERENCES timeline_requests(id),\
     status_code INTEGER NOT NULL,\
@@ -108,7 +108,7 @@ impl SchemaCatalog {
                 },
                 TableSpec {
                     name: "replay_collections".to_string(),
-                    create_sql: "CREATE TABLE replay_collections (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS replay_collections (\
     id INTEGER PRIMARY KEY,\
     name TEXT NOT NULL,\
     created_at TEXT NOT NULL\
@@ -118,7 +118,7 @@ impl SchemaCatalog {
                 },
                 TableSpec {
                     name: "replay_requests".to_string(),
-                    create_sql: "CREATE TABLE replay_requests (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS replay_requests (\
     id INTEGER PRIMARY KEY,\
     collection_id INTEGER REFERENCES replay_collections(id),\
     source_timeline_request_id INTEGER REFERENCES timeline_requests(id),\
@@ -147,7 +147,7 @@ impl SchemaCatalog {
                 },
                 TableSpec {
                     name: "replay_versions".to_string(),
-                    create_sql: "CREATE TABLE replay_versions (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS replay_versions (\
     id INTEGER PRIMARY KEY,\
     replay_request_id INTEGER NOT NULL REFERENCES replay_requests(id),\
     parent_id INTEGER REFERENCES replay_versions(id),\
@@ -175,7 +175,7 @@ impl SchemaCatalog {
                 },
                 TableSpec {
                     name: "replay_executions".to_string(),
-                    create_sql: "CREATE TABLE replay_executions (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS replay_executions (\
     id INTEGER PRIMARY KEY,\
     replay_request_id INTEGER NOT NULL REFERENCES replay_requests(id),\
     timeline_request_id INTEGER NOT NULL REFERENCES timeline_requests(id),\
@@ -191,7 +191,7 @@ impl SchemaCatalog {
                 },
                 TableSpec {
                     name: "tags".to_string(),
-                    create_sql: "CREATE TABLE tags (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS tags (\
     id INTEGER PRIMARY KEY,\
     name TEXT NOT NULL UNIQUE\
 )"
@@ -200,7 +200,7 @@ impl SchemaCatalog {
                 },
                 TableSpec {
                     name: "timeline_request_tags".to_string(),
-                    create_sql: "CREATE TABLE timeline_request_tags (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS timeline_request_tags (\
     timeline_request_id INTEGER NOT NULL REFERENCES timeline_requests(id),\
     tag_id INTEGER NOT NULL REFERENCES tags(id),\
     PRIMARY KEY (timeline_request_id, tag_id)\
@@ -211,7 +211,7 @@ impl SchemaCatalog {
                 },
                 TableSpec {
                     name: "scope_rules".to_string(),
-                    create_sql: "CREATE TABLE scope_rules (\
+                    create_sql: "CREATE TABLE IF NOT EXISTS scope_rules (\
     id INTEGER PRIMARY KEY,\
     rule_type TEXT NOT NULL,\
     pattern_type TEXT NOT NULL,\
@@ -262,7 +262,11 @@ mod tests {
     #[test]
     fn v1_schema_includes_expected_tables() {
         let schema = SchemaCatalog::v1();
-        let names: Vec<&str> = schema.tables.iter().map(|table| table.name.as_str()).collect();
+        let names: Vec<&str> = schema
+            .tables
+            .iter()
+            .map(|table| table.name.as_str())
+            .collect();
 
         for required in [
             "timeline_sources",
@@ -290,7 +294,10 @@ mod tests {
             .expect("replay_versions table exists");
 
         assert!(
-            table.indices.iter().any(|index| index.contains("parent_id")),
+            table
+                .indices
+                .iter()
+                .any(|index| index.contains("parent_id")),
             "replay_versions should index parent_id"
         );
     }
@@ -306,7 +313,10 @@ mod tests {
             }],
         };
 
-        assert_eq!(SchemaCatalog::validate(&schema), Err(SchemaError::InvalidVersion));
+        assert_eq!(
+            SchemaCatalog::validate(&schema),
+            Err(SchemaError::InvalidVersion)
+        );
     }
 
     #[test]
@@ -320,7 +330,10 @@ mod tests {
             }],
         };
 
-        assert_eq!(SchemaCatalog::validate(&schema), Err(SchemaError::EmptyTableName));
+        assert_eq!(
+            SchemaCatalog::validate(&schema),
+            Err(SchemaError::EmptyTableName)
+        );
     }
 
     #[test]
@@ -336,7 +349,9 @@ mod tests {
 
         assert_eq!(
             SchemaCatalog::validate(&schema),
-            Err(SchemaError::EmptyTableDefinition("timeline_requests".to_string()))
+            Err(SchemaError::EmptyTableDefinition(
+                "timeline_requests".to_string()
+            ))
         );
     }
 
@@ -347,6 +362,9 @@ mod tests {
             tables: vec![],
         };
 
-        assert_eq!(SchemaCatalog::validate(&schema), Err(SchemaError::EmptyTables));
+        assert_eq!(
+            SchemaCatalog::validate(&schema),
+            Err(SchemaError::EmptyTables)
+        );
     }
 }

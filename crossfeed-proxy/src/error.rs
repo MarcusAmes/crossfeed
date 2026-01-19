@@ -6,4 +6,6 @@ pub enum ProxyError {
     Config(String),
     #[error("proxy runtime error: {0}")]
     Runtime(String),
+    #[error("proxy IO error: {0}")]
+    Io(#[from] std::io::Error),
 }

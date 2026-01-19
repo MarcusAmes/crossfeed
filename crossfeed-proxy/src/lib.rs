@@ -1,19 +1,24 @@
+#![recursion_limit = "512"]
+
 mod config;
 mod error;
 mod events;
+mod intercept;
 mod proxy;
 mod scope;
 mod timeline_event;
 
 pub use config::{
-    ListenConfig, ProxyConfig, ScopeConfig, ScopePatternType, ScopeRule, ScopeRuleType, ScopeTarget,
-    SocksAuthConfig, SocksConfig, SocksVersion, TlsMitmConfig, UpstreamConfig, UpstreamMode,
+    ListenConfig, ProxyConfig, ScopeConfig, ScopePatternType, ScopeRule, ScopeRuleType,
+    ScopeTarget, SocksAuthConfig, SocksConfig, SocksVersion, TlsMitmConfig, UpstreamConfig,
+    UpstreamMode,
 };
 pub use error::ProxyError;
-pub use events::{event_channel, ProxyEvents};
+pub use events::{ProxyCommand, ProxyControl, ProxyEvents, control_channel, event_channel};
+pub use intercept::{InterceptDecision, InterceptManager, InterceptResult};
 pub use proxy::Proxy;
 pub use scope::is_in_scope;
-pub use timeline_event::TimelineEvent;
+pub use timeline_event::{ProxyEvent, ProxyEventKind};
 
 #[cfg(test)]
 mod tests {

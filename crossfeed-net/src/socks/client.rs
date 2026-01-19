@@ -150,7 +150,12 @@ fn parse_socks5_response(bytes: &[u8]) -> Result<SocksResponse, SocksError> {
                     offset: bytes.len(),
                 });
             }
-            let ip = [bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]];
+            let ip = [
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ];
             cursor += 4;
             SocksAddress::IpV4(ip)
         }
@@ -189,7 +194,7 @@ fn parse_socks5_response(bytes: &[u8]) -> Result<SocksResponse, SocksError> {
             return Err(SocksError {
                 kind: SocksErrorKind::UnsupportedAddressType,
                 offset: cursor,
-            })
+            });
         }
     };
 
@@ -273,16 +278,22 @@ mod tests {
     #[test]
     fn builds_socks5_connect_ipv4() {
         let bytes = build_socks5_connect(SocksAddress::IpV4([127, 0, 0, 1]), 8080);
-        assert_eq!(bytes, vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x1f, 0x90]);
+        assert_eq!(
+            bytes,
+            vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x1f, 0x90]
+        );
     }
 
     #[test]
     fn builds_socks4a_connect_domain() {
         let bytes = build_socks4_connect(SocksAddress::Domain("example.com".to_string()), 80, "");
-        assert_eq!(bytes, vec![
-            0x04, 0x01, 0x00, 0x50, 0x00, 0x00, 0x00, 0x01, 0x00,
-            b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm', 0x00,
-        ]);
+        assert_eq!(
+            bytes,
+            vec![
+                0x04, 0x01, 0x00, 0x50, 0x00, 0x00, 0x00, 0x01, 0x00, b'e', b'x', b'a', b'm', b'p',
+                b'l', b'e', b'.', b'c', b'o', b'm', 0x00,
+            ]
+        );
     }
 
     #[test]

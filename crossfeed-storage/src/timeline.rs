@@ -63,18 +63,20 @@ pub trait TimelineStore: Send {
     fn insert_response(&self, response: TimelineResponse) -> Result<(), String>;
 }
 
-#[derive(Clone)]
 pub struct TimelineRecorder {
-    store: std::sync::Arc<dyn TimelineStore + Send + Sync>,
+    store: Box<dyn TimelineStore + Send>,
     limits: BodyLimits,
 }
 
 impl TimelineRecorder {
-    pub fn new(store: std::sync::Arc<dyn TimelineStore + Send + Sync>, limits: BodyLimits) -> Self {
+    pub fn new(store: Box<dyn TimelineStore + Send>, limits: BodyLimits) -> Self {
         Self { store, limits }
     }
 
-    pub fn record_request(&self, mut request: TimelineRequest) -> Result<TimelineInsertResult, String> {
+    pub fn record_request(
+        &self,
+        mut request: TimelineRequest,
+    ) -> Result<TimelineInsertResult, String> {
         let (body, truncated) = truncate_body(request.request_body, self.limits.request_max_bytes);
         request.request_body = body;
         request.request_body_truncated = truncated;
@@ -82,7 +84,8 @@ impl TimelineRecorder {
     }
 
     pub fn record_response(&self, mut response: TimelineResponse) -> Result<(), String> {
-        let (body, truncated) = truncate_body(response.response_body, self.limits.response_max_bytes);
+        let (body, truncated) =
+            truncate_body(response.response_body, self.limits.response_max_bytes);
         response.response_body = body;
         response.response_body_truncated = truncated;
         self.store.insert_response(response)

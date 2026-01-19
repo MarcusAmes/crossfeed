@@ -1,20 +1,20 @@
 mod batch;
 mod client;
+#[cfg(test)]
+mod client_test;
 mod download;
+#[cfg(test)]
+mod download_test;
 mod rate_limit;
+#[cfg(test)]
+mod rate_limit_test;
 mod request;
+#[cfg(test)]
+mod request_test;
 mod response;
 mod retry;
 #[cfg(test)]
-mod rate_limit_test;
-#[cfg(test)]
-mod request_test;
-#[cfg(test)]
 mod retry_test;
-#[cfg(test)]
-mod download_test;
-#[cfg(test)]
-mod client_test;
 
 pub use batch::{BatchItem, BatchRequest, BatchResponse, BatchResultStream};
 pub use client::{Client, ClientConfig, ProxyConfig, ProxyKind};

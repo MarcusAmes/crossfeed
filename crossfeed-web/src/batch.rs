@@ -1,7 +1,7 @@
 use std::pin::Pin;
 
 use tokio::sync::mpsc;
-use tokio_stream::{wrappers::ReceiverStream, Stream};
+use tokio_stream::{Stream, wrappers::ReceiverStream};
 
 use crate::{Client, Request, Response};
 
@@ -31,10 +31,13 @@ impl Client {
             let client = self.clone();
             let sender = sender.clone();
             tokio::spawn(async move {
-                let result = client.request(item.request).await.map(|response| BatchResponse {
-                    id: index,
-                    response,
-                });
+                let result = client
+                    .request(item.request)
+                    .await
+                    .map(|response| BatchResponse {
+                        id: index,
+                        response,
+                    });
                 let _ = sender.send(result).await;
             });
         }

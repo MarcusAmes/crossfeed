@@ -1,5 +1,5 @@
-use super::types::{SocksError, SocksErrorKind, SocksResponse};
 use super::client::parse_socks_response;
+use super::types::{SocksError, SocksErrorKind, SocksResponse};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocksParseStatus {
@@ -32,8 +32,8 @@ impl SocksResponseParser {
 
 #[cfg(test)]
 mod tests {
-    use super::SocksResponseParser;
     use super::SocksParseStatus;
+    use super::SocksResponseParser;
 
     #[test]
     fn parses_response_across_buffers() {

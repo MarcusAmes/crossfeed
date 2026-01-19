@@ -1,6 +1,9 @@
 use tempfile::NamedTempFile;
 
-use crate::{SqliteConfig, SqliteStore, TimelineQuery, TimelineRequest, TimelineResponse, TimelineSort, TimelineStore};
+use crate::{
+    SqliteConfig, SqliteStore, TimelineQuery, TimelineRequest, TimelineResponse, TimelineSort,
+    TimelineStore,
+};
 
 fn sample_request(url: &str) -> TimelineRequest {
     TimelineRequest {
@@ -55,13 +58,18 @@ fn fts_search_finds_request() {
     };
     let store = SqliteStore::open_with_config(file.path(), config).unwrap();
 
-    let id = store.insert_request(sample_request("http://example.com/one")).unwrap().request_id;
+    let id = store
+        .insert_request(sample_request("http://example.com/one"))
+        .unwrap()
+        .request_id;
     store.insert_response(sample_response(id)).unwrap();
 
     let query = TimelineQuery {
         search: Some("response".to_string()),
         ..TimelineQuery::default()
     };
-    let results = store.query_requests(&query, TimelineSort::StartedAtDesc).unwrap();
+    let results = store
+        .query_requests(&query, TimelineSort::StartedAtDesc)
+        .unwrap();
     assert_eq!(results.len(), 1);
 }

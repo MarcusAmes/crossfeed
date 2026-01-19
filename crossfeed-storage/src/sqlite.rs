@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::query::{TimelineQuery, TimelineSort};
 use crate::schema::SchemaCatalog;
@@ -73,7 +73,10 @@ impl SqliteStore {
                 .execute(&table.create_sql, [])
                 .map_err(|err| err.to_string())?;
             for index in table.indices {
-                self.conn.execute(&index, []).map_err(|err| err.to_string())?;
+                let index_sql = index.replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS");
+                self.conn
+                    .execute(&index_sql, [])
+                    .map_err(|err| err.to_string())?;
             }
         }
 
@@ -219,8 +222,14 @@ impl TimelineStore for SqliteStore {
 }
 
 impl SqliteStore {
-    pub fn query_requests(&self, query: &TimelineQuery, sort: TimelineSort) -> Result<Vec<TimelineRequest>, String> {
-        let mut sql = String::from("SELECT source.name, req.method, req.scheme, req.host, req.port, req.path, req.query, req.url, req.http_version, req.request_headers, req.request_body, req.request_body_size, req.request_body_truncated, req.started_at, req.completed_at, req.duration_ms, req.scope_status_at_capture, req.scope_status_current, req.scope_rules_version, req.capture_filtered, req.timeline_filtered FROM timeline_requests req JOIN timeline_sources source ON req.source_id = source.id");
+    pub fn query_requests(
+        &self,
+        query: &TimelineQuery,
+        sort: TimelineSort,
+    ) -> Result<Vec<TimelineRequest>, String> {
+        let mut sql = String::from(
+            "SELECT source.name, req.method, req.scheme, req.host, req.port, req.path, req.query, req.url, req.http_version, req.request_headers, req.request_body, req.request_body_size, req.request_body_truncated, req.started_at, req.completed_at, req.duration_ms, req.scope_status_at_capture, req.scope_status_current, req.scope_rules_version, req.capture_filtered, req.timeline_filtered FROM timeline_requests req JOIN timeline_sources source ON req.source_id = source.id",
+        );
         let mut where_clauses = Vec::new();
         let mut params: Vec<rusqlite::types::Value> = Vec::new();
         let mut join_responses = false;
@@ -280,7 +289,9 @@ impl SqliteStore {
 
         let mut statement = self.conn.prepare(&sql).map_err(|err| err.to_string())?;
         let rows = statement
-            .query_map(rusqlite::params_from_iter(params.iter()), |row| parse_request_row(row))
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                parse_request_row(row)
+            })
             .map_err(|err| err.to_string())?;
         let mut results = Vec::new();
         for row in rows {

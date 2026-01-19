@@ -20,7 +20,9 @@ pub fn generate_ca(common_name: &str) -> Result<CaCertificate, TlsError> {
     let now = SystemTime::now();
     params.not_before = rcgen::date_time_ymd(2024, 1, 1);
     params.not_after = rcgen::date_time_ymd(2024, 1, 1);
-    if let Some(valid_until) = now.checked_add(Duration::from_secs(DEFAULT_CA_VALIDITY_DAYS * 24 * 3600)) {
+    if let Some(valid_until) =
+        now.checked_add(Duration::from_secs(DEFAULT_CA_VALIDITY_DAYS * 24 * 3600))
+    {
         let datetime = chrono::DateTime::<chrono::Utc>::from(valid_until);
         params.not_after = rcgen::date_time_ymd(
             datetime.year(),
@@ -55,10 +57,12 @@ pub fn generate_ca(common_name: &str) -> Result<CaCertificate, TlsError> {
 }
 
 #[allow(dead_code)]
-pub fn write_ca_to_dir(dir: impl AsRef<Path>, material: &CaMaterial) -> Result<CaMaterialPaths, TlsError> {
+pub fn write_ca_to_dir(
+    dir: impl AsRef<Path>,
+    material: &CaMaterial,
+) -> Result<CaMaterialPaths, TlsError> {
     let dir = dir.as_ref();
-    fs::create_dir_all(dir)
-        .map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
+    fs::create_dir_all(dir).map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
 
     let cert_path = dir.join("crossfeed-ca.pem");
     let key_path = dir.join("crossfeed-ca-key.pem");
@@ -68,5 +72,8 @@ pub fn write_ca_to_dir(dir: impl AsRef<Path>, material: &CaMaterial) -> Result<C
     fs::write(&key_path, &material.key_pem)
         .map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
 
-    Ok(CaMaterialPaths { cert_path, key_path })
+    Ok(CaMaterialPaths {
+        cert_path,
+        key_path,
+    })
 }

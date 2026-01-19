@@ -40,7 +40,10 @@ impl HpackEncoder {
     }
 
     pub fn encode(&mut self, headers: &[HeaderField]) -> Vec<u8> {
-        self.inner
-            .encode(headers.iter().map(|header| (header.name.as_slice(), header.value.as_slice())))
+        self.inner.encode(
+            headers
+                .iter()
+                .map(|header| (header.name.as_slice(), header.value.as_slice())),
+        )
     }
 }

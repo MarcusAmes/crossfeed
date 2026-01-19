@@ -1,4 +1,6 @@
-use crate::timeline::{BodyLimits, TimelineRecorder, TimelineRequest, TimelineResponse, TimelineStore};
+use crate::timeline::{
+    BodyLimits, TimelineRecorder, TimelineRequest, TimelineResponse, TimelineStore,
+};
 
 struct MockStore {
     last_request: std::sync::Mutex<Option<TimelineRequest>>,
@@ -15,7 +17,10 @@ impl MockStore {
 }
 
 impl TimelineStore for MockStore {
-    fn insert_request(&self, request: TimelineRequest) -> Result<crate::timeline::TimelineInsertResult, String> {
+    fn insert_request(
+        &self,
+        request: TimelineRequest,
+    ) -> Result<crate::timeline::TimelineInsertResult, String> {
         *self.last_request.lock().unwrap() = Some(request);
         Ok(crate::timeline::TimelineInsertResult { request_id: 42 })
     }

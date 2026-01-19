@@ -1,0 +1,11 @@
+[package]
+name = "crossfeed-proxy-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossfeed-ingest = { path = "../crossfeed-ingest" }
+crossfeed-proxy = { path = "../crossfeed-proxy" }
+crossfeed-storage = { path = "../crossfeed-storage" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }

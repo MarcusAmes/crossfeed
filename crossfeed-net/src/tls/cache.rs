@@ -58,8 +58,7 @@ impl CertCache {
         let Some(path) = &self.disk_path else {
             return Ok(());
         };
-        fs::create_dir_all(path)
-            .map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
+        fs::create_dir_all(path).map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
 
         let cert_path = path.join(format!("{host}.pem"));
         let key_path = path.join(format!("{host}.key"));
@@ -73,8 +72,10 @@ impl CertCache {
     fn load_from_disk(&self, path: &Path, host: &str) -> Result<LeafCertificate, TlsError> {
         let cert_path = path.join(format!("{host}.pem"));
         let key_path = path.join(format!("{host}.key"));
-        let cert_pem = fs::read(cert_path).map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
-        let key_pem = fs::read(key_path).map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
+        let cert_pem =
+            fs::read(cert_path).map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
+        let key_pem =
+            fs::read(key_path).map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
         Ok(LeafCertificate { cert_pem, key_pem })
     }
 

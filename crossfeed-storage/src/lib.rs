@@ -1,15 +1,15 @@
 mod project;
 mod query;
-mod schema;
-mod sqlite;
-mod timeline;
-mod worker;
 #[cfg(test)]
 mod query_test;
+mod schema;
+mod sqlite;
 #[cfg(test)]
 mod sqlite_test;
+mod timeline;
 #[cfg(test)]
 mod timeline_test;
+mod worker;
 
 pub use project::{ProjectLayout, ProjectPaths};
 pub use query::{TimelineQuery, TimelineSort};
@@ -20,5 +20,5 @@ pub use timeline::{
     TimelineStore,
 };
 pub use worker::{
-    spawn_timeline_worker, TimelineEvent, TimelineWorkerConfig, TimelineWorkerHandle,
+    TimelineEvent, TimelineWorkerConfig, TimelineWorkerHandle, spawn_timeline_worker,
 };

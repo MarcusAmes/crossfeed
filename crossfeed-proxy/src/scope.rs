@@ -32,11 +32,9 @@ fn matches_rule(rule: &ScopeRule, host: &str, path: &str) -> bool {
 
     match rule.pattern_type {
         ScopePatternType::Wildcard => wildcard_match(&rule.pattern, target_value),
-        ScopePatternType::Regex => {
-            regex::Regex::new(&rule.pattern)
-                .map(|re| re.is_match(target_value))
-                .unwrap_or(false)
-        }
+        ScopePatternType::Regex => regex::Regex::new(&rule.pattern)
+            .map(|re| re.is_match(target_value))
+            .unwrap_or(false),
     }
 }
 

@@ -65,9 +65,18 @@ mod tests {
         let layout = ProjectLayout::default();
         let paths = ProjectPaths::new("/tmp/crossfeed", &layout);
 
-        assert_eq!(paths.config, std::path::Path::new("/tmp/crossfeed/project.toml"));
-        assert_eq!(paths.database, std::path::Path::new("/tmp/crossfeed/db.sqlite"));
-        assert_eq!(paths.exports_dir, std::path::Path::new("/tmp/crossfeed/exports"));
+        assert_eq!(
+            paths.config,
+            std::path::Path::new("/tmp/crossfeed/project.toml")
+        );
+        assert_eq!(
+            paths.database,
+            std::path::Path::new("/tmp/crossfeed/db.sqlite")
+        );
+        assert_eq!(
+            paths.exports_dir,
+            std::path::Path::new("/tmp/crossfeed/exports")
+        );
         assert_eq!(paths.logs_dir, std::path::Path::new("/tmp/crossfeed/logs"));
     }
 }

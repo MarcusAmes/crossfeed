@@ -1,10 +1,11 @@
-use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 
-use crate::timeline::{BodyLimits, TimelineInsertResult, TimelineRecorder, TimelineRequest, TimelineResponse, TimelineStore};
+use crate::timeline::{
+    BodyLimits, TimelineInsertResult, TimelineRecorder, TimelineRequest, TimelineResponse,
+    TimelineStore,
+};
 
 #[derive(Debug, Clone)]
 pub struct TimelineWorkerConfig {
@@ -41,14 +42,14 @@ impl TimelineWorkerHandle {
 }
 
 pub fn spawn_timeline_worker(
-    store: Arc<dyn TimelineStore + Send + Sync>,
+    store: Box<dyn TimelineStore>,
     limits: BodyLimits,
     config: TimelineWorkerConfig,
 ) -> TimelineWorkerHandle {
     let (sender, receiver) = bounded(config.max_queue_size);
     let recorder = TimelineRecorder::new(store, limits);
 
-    thread::spawn(move || worker_loop(receiver, recorder, config));
+    std::thread::spawn(move || worker_loop(receiver, recorder, config));
 
     TimelineWorkerHandle { sender }
 }

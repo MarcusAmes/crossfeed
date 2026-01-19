@@ -4,7 +4,9 @@ members = [
     "crossfeed-core",
     "crossfeed-gui", "crossfeed-net",
     "crossfeed-proxy",
+    "crossfeed-proxy-cli",
     "crossfeed-storage",
+    "crossfeed-ingest",
     "crossfeed-tui",
     "crossfeed-web",
 ]

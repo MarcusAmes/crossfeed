@@ -1,8 +1,8 @@
 use super::hpack::HpackDecoder;
 use super::types::{
-    DataFrame, Frame, FrameHeader, FramePayload, FrameType, GoAwayFrame, HeadersFrame,
-    Http2Error, Http2ErrorKind, Http2Warning, Http2WarningKind, PingFrame, PriorityFrame,
-    RstStreamFrame, SettingsFrame, WindowUpdateFrame,
+    DataFrame, Frame, FrameHeader, FramePayload, FrameType, GoAwayFrame, HeadersFrame, Http2Error,
+    Http2ErrorKind, Http2Warning, Http2WarningKind, PingFrame, PriorityFrame, RstStreamFrame,
+    SettingsFrame, WindowUpdateFrame,
 };
 
 const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -10,9 +10,17 @@ const FRAME_HEADER_LEN: usize = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Http2ParseStatus {
-    NeedMore { warnings: Vec<Http2Warning> },
-    Complete { frame: Frame, warnings: Vec<Http2Warning> },
-    Error { error: Http2Error, warnings: Vec<Http2Warning> },
+    NeedMore {
+        warnings: Vec<Http2Warning>,
+    },
+    Complete {
+        frame: Frame,
+        warnings: Vec<Http2Warning>,
+    },
+    Error {
+        error: Http2Error,
+        warnings: Vec<Http2Warning>,
+    },
 }
 
 pub struct Http2Parser {
@@ -107,7 +115,9 @@ impl Http2Parser {
     fn attach_header_block(&mut self, frame: Frame) -> Result<Option<Frame>, Http2Error> {
         match frame.payload {
             FramePayload::Headers(headers) => self.handle_headers_frame(frame.header, headers),
-            FramePayload::Continuation(fragment) => self.handle_continuation_frame(frame.header, fragment),
+            FramePayload::Continuation(fragment) => {
+                self.handle_continuation_frame(frame.header, fragment)
+            }
             _ => Ok(Some(frame)),
         }
     }
@@ -368,8 +378,8 @@ fn decode_payload(
                     offset: 0,
                 });
             }
-            let last_stream_id = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
-                & 0x7FFF_FFFF;
+            let last_stream_id =
+                u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) & 0x7FFF_FFFF;
             let error_code = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
             let debug_data = payload[8..].to_vec();
             Ok(FramePayload::GoAway(GoAwayFrame {
@@ -385,7 +395,8 @@ fn decode_payload(
                     offset: 0,
                 });
             }
-            let increment = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) & 0x7FFF_FFFF;
+            let increment =
+                u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) & 0x7FFF_FFFF;
             Ok(FramePayload::WindowUpdate(WindowUpdateFrame {
                 stream_id,
                 increment,

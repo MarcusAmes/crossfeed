@@ -8,9 +8,17 @@ const HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseStatus<T> {
-    NeedMore { warnings: Vec<ParseWarning> },
-    Complete { message: T, warnings: Vec<ParseWarning> },
-    Error { error: ParseError, warnings: Vec<ParseWarning> },
+    NeedMore {
+        warnings: Vec<ParseWarning>,
+    },
+    Complete {
+        message: T,
+        warnings: Vec<ParseWarning>,
+    },
+    Error {
+        error: ParseError,
+        warnings: Vec<ParseWarning>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -264,7 +272,11 @@ fn parse_status_line(
     })
 }
 
-fn parse_http_version(version_raw: &str, offset: usize, warnings: &mut Vec<ParseWarning>) -> HttpVersion {
+fn parse_http_version(
+    version_raw: &str,
+    offset: usize,
+    warnings: &mut Vec<ParseWarning>,
+) -> HttpVersion {
     match version_raw {
         "HTTP/1.0" => HttpVersion::Http10,
         "HTTP/1.1" => HttpVersion::Http11,
@@ -338,7 +350,12 @@ fn parse_headers(
             });
         }
 
-        if !value.is_empty() && value.as_bytes().iter().any(|byte| *byte == b'\r' || *byte == b'\n') {
+        if !value.is_empty()
+            && value
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte == b'\r' || *byte == b'\n')
+        {
             warnings.push(ParseWarning {
                 kind: ParseWarningKind::InvalidHeaderValue,
                 offset,
@@ -565,7 +582,11 @@ mod tests {
 
         match status {
             ParseStatus::Complete { warnings, .. } => {
-                assert!(warnings.iter().any(|warning| matches!(warning.kind, ParseWarningKind::ObsFoldDetected)));
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|warning| matches!(warning.kind, ParseWarningKind::ObsFoldDetected))
+                );
             }
             other => panic!("unexpected status {other:?}"),
         }
@@ -591,7 +612,11 @@ mod tests {
 
         match status {
             ParseStatus::Complete { warnings, .. } => {
-                assert!(warnings.iter().any(|warning| matches!(warning.kind, ParseWarningKind::UnknownVersion(_))));
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|warning| matches!(warning.kind, ParseWarningKind::UnknownVersion(_)))
+                );
             }
             other => panic!("unexpected status {other:?}"),
         }

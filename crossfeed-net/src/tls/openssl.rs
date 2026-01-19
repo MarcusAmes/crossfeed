@@ -11,14 +11,13 @@ pub struct TlsConfig {
 
 impl Default for TlsConfig {
     fn default() -> Self {
-        Self { allow_legacy: false }
+        Self {
+            allow_legacy: false,
+        }
     }
 }
 
-pub fn build_acceptor(
-    config: &TlsConfig,
-    leaf: &LeafCertificate,
-) -> Result<SslAcceptor, TlsError> {
+pub fn build_acceptor(config: &TlsConfig, leaf: &LeafCertificate) -> Result<SslAcceptor, TlsError> {
     let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
         .map_err(|err| TlsError::new(TlsErrorKind::OpenSsl, err.to_string()))?;
 
@@ -45,7 +44,8 @@ fn apply_legacy(builder: &mut SslAcceptorBuilder, allow_legacy: bool) -> Result<
     if allow_legacy {
         builder.set_options(SslOptions::NO_TICKET);
         builder.clear_options(SslOptions::NO_SSLV2 | SslOptions::NO_SSLV3);
-        builder.set_cipher_list("ALL:@SECLEVEL=0")
+        builder
+            .set_cipher_list("ALL:@SECLEVEL=0")
             .map_err(|err| TlsError::new(TlsErrorKind::OpenSsl, err.to_string()))?;
     } else {
         builder.set_options(SslOptions::NO_SSLV2 | SslOptions::NO_SSLV3);
