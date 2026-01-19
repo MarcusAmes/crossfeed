@@ -183,7 +183,7 @@ Status: [x] Completed
 ---
 
 ## Milestone 6: Codec Core
-Status: [ ] Completed
+Status: [x] Completed
 **Goal:** Shared codec utilities.
 **Includes:**
 - URL/Base64/HTML/Hex/gzip/deflate encode/decode.
