@@ -248,3 +248,49 @@ fn query_applies_pagination_and_sorting() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path, "/second");
 }
+
+#[test]
+fn high_volume_inserts_support_filtering() {
+    let file = NamedTempFile::new().unwrap();
+    let store = SqliteStore::open(file.path()).unwrap();
+
+    for i in 0..5000 {
+        let path = if i % 2 == 0 { "/api/items" } else { "/health" };
+        let url = format!("http://example.com{path}?id={i}");
+        let mut request = sample_request(&url, path, "GET", "proxy");
+        request.started_at = format!("2024-01-01T00:00:{:02}Z", i % 60);
+        let id = store.insert_request(request).unwrap().request_id;
+        let status = if i % 2 == 0 { 200 } else { 404 };
+        store.insert_response(sample_response(id, status)).unwrap();
+    }
+
+    let host_query = TimelineQuery {
+        host: Some("example.com".to_string()),
+        limit: 6000,
+        ..TimelineQuery::default()
+    };
+    let host_results = store
+        .query_requests(&host_query, TimelineSort::StartedAtDesc)
+        .unwrap();
+    assert_eq!(host_results.len(), 5000);
+
+    let prefix_query = TimelineQuery {
+        path_prefix: Some("/api".to_string()),
+        limit: 6000,
+        ..TimelineQuery::default()
+    };
+    let prefix_results = store
+        .query_requests(&prefix_query, TimelineSort::StartedAtDesc)
+        .unwrap();
+    assert_eq!(prefix_results.len(), 2500);
+
+    let status_query = TimelineQuery {
+        status: Some(200),
+        limit: 6000,
+        ..TimelineQuery::default()
+    };
+    let status_results = store
+        .query_requests(&status_query, TimelineSort::StartedAtDesc)
+        .unwrap();
+    assert_eq!(status_results.len(), 2500);
+}
