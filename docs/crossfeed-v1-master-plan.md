@@ -169,7 +169,7 @@ Status: [x] Completed
 ---
 
 ## Milestone 5: Timeline Service
-Status: [ ] Completed
+Status: [x] Completed
 **Goal:** Unified timeline capture, query, sort, filter.
 **Includes:**
 - Timeline write pipeline from proxy + tools.
