@@ -1,8 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
+    "crossfeed-codec",
     "crossfeed-core",
-    "crossfeed-gui", "crossfeed-net",
+    "crossfeed-gui",
+    "crossfeed-net",
     "crossfeed-proxy",
     "crossfeed-proxy-cli",
     "crossfeed-storage",
