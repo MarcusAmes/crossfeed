@@ -2,6 +2,53 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectConfig {
+    pub timeline: TimelineConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TimelineConfig {
+    pub body_limits_mb: BodyLimitsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BodyLimitsConfig {
+    pub request_max_mb: u64,
+    pub response_max_mb: u64,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            timeline: TimelineConfig {
+                body_limits_mb: BodyLimitsConfig {
+                    request_max_mb: 40,
+                    response_max_mb: 40,
+                },
+            },
+        }
+    }
+}
+
+impl ProjectConfig {
+    pub fn load_or_create(path: &Path) -> Result<Self, String> {
+        if path.exists() {
+            let raw = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+            toml::from_str(&raw).map_err(|err| err.to_string())
+        } else {
+            let config = Self::default();
+            config.save(path)?;
+            Ok(config)
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        let contents = toml::to_string_pretty(self).map_err(|err| err.to_string())?;
+        std::fs::write(path, contents).map_err(|err| err.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectLayout {
     pub config_filename: String,
     pub database_filename: String,
@@ -49,7 +96,7 @@ impl ProjectPaths {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectLayout, ProjectPaths};
+    use super::{ProjectConfig, ProjectLayout, ProjectPaths};
 
     #[test]
     fn default_layout_uses_expected_names() {
@@ -78,5 +125,24 @@ mod tests {
             std::path::Path::new("/tmp/crossfeed/exports")
         );
         assert_eq!(paths.logs_dir, std::path::Path::new("/tmp/crossfeed/logs"));
+    }
+
+    #[test]
+    fn project_config_defaults_include_body_limits() {
+        let config = ProjectConfig::default();
+        assert_eq!(config.timeline.body_limits_mb.request_max_mb, 40);
+        assert_eq!(config.timeline.body_limits_mb.response_max_mb, 40);
+    }
+
+    #[test]
+    fn project_config_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("project.toml");
+        let mut config = ProjectConfig::default();
+        config.timeline.body_limits_mb.request_max_mb = 64;
+        config.timeline.body_limits_mb.response_max_mb = 128;
+        config.save(&path).unwrap();
+        let loaded = ProjectConfig::load_or_create(&path).unwrap();
+        assert_eq!(loaded, config);
     }
 }

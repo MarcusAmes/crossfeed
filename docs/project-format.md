@@ -9,6 +9,13 @@ Crossfeed projects are stored as folders that contain configuration and data fil
 - `exports/`: user-triggered exports (optional)
 - `logs/`: diagnostic logs (optional)
 
+## Project Configuration (Draft)
+```toml
+[timeline.body_limits_mb]
+request_max_mb = 40
+response_max_mb = 40
+```
+
 ## Database Schema (Draft)
 Tables and indexes are defined in the storage crate schema catalog. SQL definitions
 will be finalized before Milestone 1 completes, aligned with timeline/replay/fuzzer naming.

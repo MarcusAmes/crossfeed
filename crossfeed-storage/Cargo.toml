@@ -8,6 +8,7 @@ crossbeam-channel = "0.5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
+toml = "0.8"
 
 [dev-dependencies]
 assert_matches = "1"

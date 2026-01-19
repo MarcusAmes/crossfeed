@@ -11,7 +11,7 @@ mod timeline;
 mod timeline_test;
 mod worker;
 
-pub use project::{ProjectLayout, ProjectPaths};
+pub use project::{BodyLimitsConfig, ProjectConfig, ProjectLayout, ProjectPaths, TimelineConfig};
 pub use query::{TimelineQuery, TimelineSort};
 pub use schema::{SchemaCatalog, SchemaError, SchemaSpec, TableSpec};
 pub use sqlite::{FtsConfig, SqliteConfig, SqliteStore};
