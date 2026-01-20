@@ -207,7 +207,7 @@ Status: [x] Completed
 ---
 
 ## Milestone 8: Fuzzer Core
-Status: [ ] Completed
+Status: [x] Completed
 **Goal:** Fuzzing with response analysis.
 **Includes:**
 - Multiple payload positions.
