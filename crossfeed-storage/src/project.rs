@@ -2,16 +2,27 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ProjectConfig {
     pub timeline: TimelineConfig,
+    pub proxy: ProxyProjectConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct TimelineConfig {
     pub body_limits_mb: BodyLimitsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProxyProjectConfig {
+    pub listen_host: String,
+    pub listen_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct BodyLimitsConfig {
     pub request_max_mb: u64,
     pub response_max_mb: u64,
@@ -20,12 +31,34 @@ pub struct BodyLimitsConfig {
 impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
-            timeline: TimelineConfig {
-                body_limits_mb: BodyLimitsConfig {
-                    request_max_mb: 40,
-                    response_max_mb: 40,
-                },
-            },
+            timeline: TimelineConfig::default(),
+            proxy: ProxyProjectConfig::default(),
+        }
+    }
+}
+
+impl Default for TimelineConfig {
+    fn default() -> Self {
+        Self {
+            body_limits_mb: BodyLimitsConfig::default(),
+        }
+    }
+}
+
+impl Default for BodyLimitsConfig {
+    fn default() -> Self {
+        Self {
+            request_max_mb: 40,
+            response_max_mb: 40,
+        }
+    }
+}
+
+impl Default for ProxyProjectConfig {
+    fn default() -> Self {
+        Self {
+            listen_host: "127.0.0.1".to_string(),
+            listen_port: 8888,
         }
     }
 }
@@ -141,6 +174,7 @@ mod tests {
         let mut config = ProjectConfig::default();
         config.timeline.body_limits_mb.request_max_mb = 64;
         config.timeline.body_limits_mb.response_max_mb = 128;
+        config.proxy.listen_port = 9999;
         config.save(&path).unwrap();
         let loaded = ProjectConfig::load_or_create(&path).unwrap();
         assert_eq!(loaded, config);

@@ -8,7 +8,7 @@ version.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 hpack = "0.3"
 openssl = { version = "0.10", features = ["vendored"] }
-rcgen = "0.12"
+rcgen = { version = "0.12", features = ["pem", "x509-parser"] }
 twoway = "0.2"
 
 [lints]

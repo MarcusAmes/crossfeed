@@ -577,6 +577,19 @@ impl SqliteStore {
             where_clauses.push("req.started_at >= ?".to_string());
             params.push(since.clone().into());
         }
+        if let Some(after) = &query.after_started_at {
+            if let Some(after_id) = query.after_request_id {
+                where_clauses.push(
+                    "(req.started_at > ? OR (req.started_at = ? AND req.id > ?))".to_string(),
+                );
+                params.push(after.clone().into());
+                params.push(after.clone().into());
+                params.push(after_id.into());
+            } else {
+                where_clauses.push("req.started_at > ?".to_string());
+                params.push(after.clone().into());
+            }
+        }
         if let Some(until) = &query.until {
             where_clauses.push("req.started_at <= ?".to_string());
             params.push(until.clone().into());

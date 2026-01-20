@@ -14,7 +14,10 @@ mod timeline;
 mod timeline_test;
 mod worker;
 
-pub use project::{BodyLimitsConfig, ProjectConfig, ProjectLayout, ProjectPaths, TimelineConfig};
+pub use project::{
+    BodyLimitsConfig, ProjectConfig, ProjectLayout, ProjectPaths, ProxyProjectConfig,
+    TimelineConfig,
+};
 pub use query::{TimelineQuery, TimelineSort};
 pub use replay::{ReplayExecution, ReplayRequest, ReplayVersion};
 pub use schema::{SchemaCatalog, SchemaError, SchemaSpec, TableSpec};

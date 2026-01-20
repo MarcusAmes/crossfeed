@@ -1,3 +1,7 @@
+mod project_runtime;
+mod proxy_runtime;
+mod timeline_tail;
+
 use crossfeed_proxy::{ProxyEvent, ProxyEventKind};
 use crossfeed_storage::{
     BodyLimits, TimelineEvent, TimelineStore, TimelineWorkerConfig, TimelineWorkerHandle,
@@ -5,6 +9,17 @@ use crossfeed_storage::{
 };
 
 use futures::StreamExt;
+
+pub use project_runtime::{ProjectContext, open_or_create_project};
+pub use proxy_runtime::{ProxyRuntimeConfig, start_proxy};
+pub use timeline_tail::{TailCursor, TailUpdate, TimelineItem, tail_query};
+
+#[cfg(feature = "sync-runtime")]
+pub use project_runtime::open_or_create_project_sync;
+#[cfg(feature = "sync-runtime")]
+pub use proxy_runtime::start_proxy_sync;
+#[cfg(feature = "sync-runtime")]
+pub use timeline_tail::tail_query_sync;
 
 #[derive(Debug, Clone)]
 pub struct IngestHandle {

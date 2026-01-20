@@ -1,9 +1,12 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use crossfeed_ingest::{
+    ProjectContext, ProxyRuntimeConfig, TailCursor, TailUpdate, TimelineItem,
+    open_or_create_project, start_proxy, tail_query,
+};
 use crossfeed_storage::{
-    ProjectConfig, ProjectLayout, ProjectPaths, ResponseSummary, SqliteStore, TimelineQuery,
-    TimelineRequestSummary, TimelineSort,
+    ProjectConfig, ProjectPaths, ResponseSummary, SqliteStore, TimelineQuery, TimelineSort,
 };
 use iced::event;
 use iced::keyboard::{self, Key, Modifiers};
@@ -27,6 +30,7 @@ fn main() -> iced::Result {
 enum Screen {
     ProjectPicker(ProjectPickerState),
     Timeline(TimelineState),
+    ProjectSettings(ProjectSettingsState),
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +46,15 @@ enum Message {
     PaneResized(pane_grid::ResizeEvent),
     TimelineSelected(usize),
     KeyPressed(keyboard::Key, Modifiers),
+    ShowProjectSettings,
+    SaveProjectSettings,
+    CloseProjectSettings,
+    UpdateProxyHost(String),
+    UpdateProxyPort(String),
+    RetryProxyStart,
+    TailTick,
+    TailLoaded(Result<TailUpdate, String>),
+    ProxyStarted(Result<(), String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,10 +66,103 @@ enum FocusArea {
 }
 
 #[derive(Debug, Clone)]
+struct ProxyRuntimeState {
+    status: ProxyStatus,
+    listen_host: String,
+    listen_port: u16,
+}
+
+impl ProxyRuntimeState {
+    fn new(config: &ProjectConfig) -> Self {
+        Self {
+            status: ProxyStatus::Stopped,
+            listen_host: config.proxy.listen_host.clone(),
+            listen_port: config.proxy.listen_port,
+        }
+    }
+}
+
+impl Default for ProxyRuntimeState {
+    fn default() -> Self {
+        Self {
+            status: ProxyStatus::Stopped,
+            listen_host: "127.0.0.1".to_string(),
+            listen_port: 8888,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ProxyStatus {
+    Stopped,
+    Starting,
+    Running,
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
 struct AppState {
     screen: Screen,
     config: GuiConfig,
     focus: FocusArea,
+    proxy_state: ProxyRuntimeState,
+}
+
+impl AppState {
+    fn save_project_settings(&mut self) -> Task<Message> {
+        let Screen::ProjectSettings(settings) = &self.screen else {
+            return Task::none();
+        };
+        let project_paths = settings.project_paths.clone();
+        let proxy_host = settings.proxy_host.clone();
+        let proxy_port = settings.proxy_port.clone();
+        let mut updated = settings.project_config.clone();
+        let mut timeline = settings.timeline_state.clone();
+
+        updated.proxy.listen_host = proxy_host.trim().to_string();
+        let port = proxy_port
+            .trim()
+            .parse::<u16>()
+            .unwrap_or(updated.proxy.listen_port);
+        updated.proxy.listen_port = port;
+        timeline.project_config = updated.clone();
+        if let Err(err) = updated.save(&project_paths.config) {
+            return Task::perform(async move { Err(err) }, Message::ProxyStarted);
+        }
+        self.screen = Screen::Timeline(timeline);
+        self.focus = FocusArea::Timeline;
+        self.proxy_state = ProxyRuntimeState::new(&updated);
+        self.proxy_state.status = ProxyStatus::Starting;
+        start_proxy_runtime(project_paths, updated)
+    }
+
+    fn retry_proxy_start(&mut self) -> Task<Message> {
+        let Screen::Timeline(state) = &self.screen else {
+            return Task::none();
+        };
+        self.proxy_state = ProxyRuntimeState::new(&state.project_config);
+        self.proxy_state.status = ProxyStatus::Starting;
+        start_proxy_runtime(state.project_paths.clone(), state.project_config.clone())
+    }
+
+    fn tail_tick(&mut self) -> Task<Message> {
+        if let Screen::Timeline(state) = &self.screen {
+            let request_ids = state
+                .timeline
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
+            return Task::perform(
+                tail_query_gui(
+                    state.store_path.clone(),
+                    state.tail_cursor.clone(),
+                    request_ids,
+                ),
+                Message::TailLoaded,
+            );
+        }
+        Task::none()
+    }
 }
 
 impl AppState {
@@ -68,6 +174,7 @@ impl AppState {
                 screen: Screen::ProjectPicker(ProjectPickerState::default()),
                 config: GuiConfig::default(),
                 focus: FocusArea::ProjectPicker,
+                proxy_state: ProxyRuntimeState::default(),
             },
             task,
         )
@@ -137,11 +244,20 @@ impl AppState {
                     if let Some(layout) = self.config.pane_layout.take() {
                         timeline.apply_layout(layout);
                     }
+                    self.proxy_state = ProxyRuntimeState::new(&timeline.project_config);
+                    let proxy_task = start_proxy_runtime(
+                        timeline.project_paths.clone(),
+                        timeline.project_config.clone(),
+                    );
+                    self.proxy_state.status = ProxyStatus::Starting;
                     self.screen = Screen::Timeline(timeline);
-                    Task::perform(
-                        save_gui_config(gui_config_path(), self.config.clone()),
-                        |_| Message::CancelProject,
-                    )
+                    Task::batch([
+                        Task::perform(
+                            save_gui_config(gui_config_path(), self.config.clone()),
+                            |_| Message::CancelProject,
+                        ),
+                        proxy_task,
+                    ])
                 }
                 Err(error) => {
                     if let Screen::ProjectPicker(picker) = &mut self.screen {
@@ -170,6 +286,48 @@ impl AppState {
                 if let Screen::Timeline(state) = &mut self.screen {
                     state.selected = Some(index);
                 }
+                Task::none()
+            }
+            Message::ShowProjectSettings => {
+                if let Screen::Timeline(state) = &self.screen {
+                    self.screen = Screen::ProjectSettings(ProjectSettingsState::from(state));
+                    self.focus = FocusArea::ProjectPicker;
+                }
+                Task::none()
+            }
+            Message::CloseProjectSettings => {
+                if let Screen::ProjectSettings(settings) = &self.screen {
+                    self.screen = Screen::Timeline(settings.timeline_state.clone());
+                    self.focus = FocusArea::Timeline;
+                }
+                Task::none()
+            }
+            Message::SaveProjectSettings => self.save_project_settings(),
+            Message::UpdateProxyHost(value) => {
+                if let Screen::ProjectSettings(settings) = &mut self.screen {
+                    settings.proxy_host = value;
+                }
+                Task::none()
+            }
+            Message::UpdateProxyPort(value) => {
+                if let Screen::ProjectSettings(settings) = &mut self.screen {
+                    settings.proxy_port = value;
+                }
+                Task::none()
+            }
+            Message::RetryProxyStart => self.retry_proxy_start(),
+            Message::TailTick => self.tail_tick(),
+            Message::TailLoaded(result) => {
+                if let Screen::Timeline(state) = &mut self.screen {
+                    state.apply_tail_update(result);
+                }
+                Task::none()
+            }
+            Message::ProxyStarted(result) => {
+                self.proxy_state.status = match result {
+                    Ok(()) => ProxyStatus::Running,
+                    Err(err) => ProxyStatus::Error(err),
+                };
                 Task::none()
             }
             Message::KeyPressed(key, modifiers) => self.handle_key(key, modifiers),
@@ -235,17 +393,21 @@ impl AppState {
     fn view(&self) -> Element<'_, Message> {
         match &self.screen {
             Screen::ProjectPicker(picker) => picker.view(),
-            Screen::Timeline(state) => state.view(self.focus),
+            Screen::Timeline(state) => state.view(self.focus, &self.proxy_state),
+            Screen::ProjectSettings(settings) => settings.view(),
         }
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        event::listen_with(|event, _status, _id| match event {
+        let key_events = event::listen_with(|event, _status, _id| match event {
             event::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 Some(Message::KeyPressed(key, modifiers))
             }
             _ => None,
-        })
+        });
+        let ticks =
+            iced::time::every(std::time::Duration::from_millis(500)).map(|_| Message::TailTick);
+        Subscription::batch([key_events, ticks])
     }
 
     fn theme(&self) -> Theme {
@@ -264,6 +426,15 @@ struct ProjectPickerState {
     intent: ProjectIntent,
     error: Option<String>,
     pending_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectSettingsState {
+    timeline_state: TimelineState,
+    project_paths: ProjectPaths,
+    project_config: ProjectConfig,
+    proxy_host: String,
+    proxy_port: String,
 }
 
 impl Default for ProjectPickerState {
@@ -326,6 +497,45 @@ impl ProjectPickerState {
     }
 }
 
+impl ProjectSettingsState {
+    fn from(state: &TimelineState) -> Self {
+        Self {
+            timeline_state: state.clone(),
+            project_paths: state.project_paths.clone(),
+            project_config: state.project_config.clone(),
+            proxy_host: state.project_config.proxy.listen_host.clone(),
+            proxy_port: state.project_config.proxy.listen_port.to_string(),
+        }
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        let content = column![
+            text("Project Settings").size(28),
+            text("Proxy host").size(14),
+            text_input("127.0.0.1", &self.proxy_host)
+                .on_input(Message::UpdateProxyHost)
+                .padding(8),
+            text("Proxy port").size(14),
+            text_input("8888", &self.proxy_port)
+                .on_input(Message::UpdateProxyPort)
+                .padding(8),
+            row![
+                button("Save").on_press(Message::SaveProjectSettings),
+                button("Close").on_press(Message::CloseProjectSettings),
+            ]
+            .spacing(12),
+        ]
+        .spacing(16)
+        .align_x(Alignment::Start);
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(40)
+            .into()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectIntent {
     Open,
@@ -338,20 +548,24 @@ struct TimelineState {
     timeline: Vec<TimelineItem>,
     selected: Option<usize>,
     project_root: PathBuf,
+    project_paths: ProjectPaths,
+    project_config: ProjectConfig,
     store_path: PathBuf,
     tags: HashMap<i64, Vec<String>>,
     responses: HashMap<i64, ResponseSummary>,
+    tail_cursor: TailCursor,
 }
 
 impl TimelineState {
-    fn new(project_root: PathBuf, store_path: PathBuf) -> Result<Self, String> {
+    fn new(project_paths: ProjectPaths, project_config: ProjectConfig) -> Result<Self, String> {
+        let store_path = project_paths.database.clone();
         let store = SqliteStore::open(&store_path)?;
-        let query = TimelineQuery::default();
-        let requests = store.query_request_summaries(&query, TimelineSort::StartedAtDesc)?;
+        let requests = store
+            .query_request_summaries(&TimelineQuery::default(), TimelineSort::StartedAtDesc)?;
         let ids: Vec<i64> = requests.iter().map(|item| item.id).collect();
         let tags = store.get_request_tags(&ids)?;
         let responses = store.get_response_summaries(&ids)?;
-        let timeline = requests.into_iter().map(TimelineItem::from).collect();
+        let timeline: Vec<TimelineItem> = requests.into_iter().map(TimelineItem::from).collect();
 
         let (mut panes, root) = pane_grid::State::new(PaneKind::Timeline);
         let (right, _) = panes
@@ -361,21 +575,26 @@ impl TimelineState {
             .split(pane_grid::Axis::Horizontal, right, PaneKind::Response)
             .ok_or_else(|| "Unable to split detail pane".to_string())?;
 
+        let tail_cursor = TailCursor::from_items(&timeline);
+
         Ok(Self {
             panes,
             timeline,
             selected: None,
-            project_root,
+            project_root: project_paths.root.clone(),
+            project_paths,
+            project_config,
             store_path,
             tags,
             responses,
+            tail_cursor,
         })
     }
 
-    fn view(&self, focus: FocusArea) -> Element<'_, Message> {
+    fn view(&self, focus: FocusArea, proxy_state: &ProxyRuntimeState) -> Element<'_, Message> {
         let grid = PaneGrid::new(&self.panes, |_, state, _| {
             let content: Element<'_, Message> = match state {
-                PaneKind::Timeline => self.timeline_view(focus),
+                PaneKind::Timeline => self.timeline_view(focus, proxy_state),
                 PaneKind::Detail => self.detail_view(focus),
                 PaneKind::Response => self.response_view(focus),
             };
@@ -392,12 +611,40 @@ impl TimelineState {
             .into()
     }
 
-    fn timeline_view(&self, _focus: FocusArea) -> Element<'_, Message> {
-        let mut content = column![
+    fn timeline_view(
+        &self,
+        _focus: FocusArea,
+        proxy_state: &ProxyRuntimeState,
+    ) -> Element<'_, Message> {
+        let proxy_status = match &proxy_state.status {
+            ProxyStatus::Stopped => "Proxy stopped".to_string(),
+            ProxyStatus::Starting => "Proxy starting...".to_string(),
+            ProxyStatus::Running => format!(
+                "Proxy running on {}:{}",
+                proxy_state.listen_host, proxy_state.listen_port
+            ),
+            ProxyStatus::Error(err) => format!("Proxy error: {err}"),
+        };
+        let mut header = column![
             text("Timeline").size(20),
             text(format!("Project: {}", self.project_root.display())).size(12),
+            text(proxy_status).size(12),
         ]
-        .spacing(8);
+        .spacing(6);
+
+        if matches!(proxy_state.status, ProxyStatus::Error(_)) {
+            header = header.push(
+                row![
+                    button("Retry proxy").on_press(Message::RetryProxyStart),
+                    button("Settings").on_press(Message::ShowProjectSettings),
+                ]
+                .spacing(12),
+            );
+        } else {
+            header = header.push(button("Settings").on_press(Message::ShowProjectSettings));
+        }
+
+        let mut content = column![header].spacing(12);
 
         for (index, item) in self.timeline.iter().enumerate() {
             let is_selected = self.selected == Some(index);
@@ -493,6 +740,25 @@ impl TimelineState {
         scrollable(container(content).padding(12)).into()
     }
 
+    fn apply_tail_update(&mut self, update: Result<TailUpdate, String>) {
+        let Ok(update) = update else {
+            return;
+        };
+        if update.new_items.is_empty() {
+            return;
+        }
+        for item in update.new_items.iter().rev() {
+            self.timeline.insert(0, item.clone());
+        }
+        for (id, tags) in update.tags {
+            self.tags.insert(id, tags);
+        }
+        for (id, response) in update.responses {
+            self.responses.insert(id, response);
+        }
+        self.tail_cursor = update.cursor;
+    }
+
     fn select_next(&mut self) {
         if self.timeline.is_empty() {
             self.selected = None;
@@ -555,45 +821,6 @@ impl PaneKind {
             PaneKind::Timeline => "Timeline",
             PaneKind::Detail => "Request Details",
             PaneKind::Response => "Response Preview",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TimelineItem {
-    id: i64,
-    source: String,
-    method: String,
-    host: String,
-    path: String,
-    url: String,
-    started_at: String,
-    duration_ms: Option<i64>,
-    request_body_size: usize,
-    request_body_truncated: bool,
-    completed_at: Option<String>,
-    http_version: String,
-    scope_status_at_capture: String,
-    scope_status_current: Option<String>,
-}
-
-impl From<TimelineRequestSummary> for TimelineItem {
-    fn from(value: TimelineRequestSummary) -> Self {
-        Self {
-            id: value.id,
-            source: value.source,
-            method: value.method,
-            host: value.host,
-            path: value.path,
-            url: value.url,
-            started_at: value.started_at,
-            duration_ms: value.duration_ms,
-            request_body_size: value.request_body_size,
-            request_body_truncated: value.request_body_truncated,
-            completed_at: value.completed_at,
-            http_version: value.http_version,
-            scope_status_at_capture: value.scope_status_at_capture,
-            scope_status_current: value.scope_status_current,
         }
     }
 }
@@ -720,24 +947,41 @@ async fn save_gui_config(path: PathBuf, config: GuiConfig) -> Result<(), String>
 }
 
 async fn open_project(path: PathBuf, intent: ProjectIntent) -> Result<TimelineState, String> {
-    let layout = ProjectLayout::default();
-    let paths = ProjectPaths::new(&path, &layout);
-
-    if intent == ProjectIntent::Create {
-        ensure_dir(&paths.root)?;
-        ensure_dir(&paths.exports_dir)?;
-        ensure_dir(&paths.logs_dir)?;
-        ProjectConfig::load_or_create(&paths.config)?;
-        SqliteStore::open(&paths.database)?;
-    } else if !paths.root.exists() {
+    if intent == ProjectIntent::Open && !path.exists() {
         return Err("Project directory does not exist".to_string());
     }
-
-    TimelineState::new(paths.root.clone(), paths.database.clone())
+    let context = open_or_create_project(&path)?;
+    TimelineState::new(context.paths, context.config)
 }
 
-fn ensure_dir(path: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(path).map_err(|err| err.to_string())
+fn global_certs_dir() -> Result<PathBuf, String> {
+    let base = dirs::config_dir().ok_or("Missing config directory")?;
+    Ok(base.join("crossfeed").join("certs"))
+}
+
+fn start_proxy_runtime(
+    project_paths: ProjectPaths,
+    project_config: ProjectConfig,
+) -> Task<Message> {
+    let context = ProjectContext {
+        paths: project_paths.clone(),
+        config: project_config.clone(),
+        store_path: project_paths.database.clone(),
+    };
+    let certs_dir = match global_certs_dir() {
+        Ok(path) => path,
+        Err(err) => return Task::perform(async move { Err(err) }, Message::ProxyStarted),
+    };
+    let config = ProxyRuntimeConfig::from_project(&context, certs_dir);
+    Task::perform(start_proxy(context, config), Message::ProxyStarted)
+}
+
+async fn tail_query_gui(
+    store_path: PathBuf,
+    cursor: TailCursor,
+    existing_ids: Vec<i64>,
+) -> Result<TailUpdate, String> {
+    tail_query(store_path, cursor, existing_ids, 200).await
 }
 
 fn timeline_row(

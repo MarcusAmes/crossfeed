@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crossfeed_net::{
     CertCache, Http2ParseStatus, Http2Parser, RequestParser, ResponseParser, SocksAddress,
-    SocksAuth, SocksResponseParser, SocksVersion, TlsConfig, build_acceptor, generate_ca,
-    generate_leaf_cert, write_ca_to_dir,
+    SocksAuth, SocksResponseParser, SocksVersion, TlsConfig, build_acceptor, generate_leaf_cert,
+    load_or_generate_ca,
 };
 use crossfeed_storage::{TimelineRequest, TimelineResponse};
 
@@ -40,13 +40,12 @@ struct ProxyState {
 
 impl Proxy {
     pub fn new(config: ProxyConfig) -> Result<(Self, ProxyEvents, ProxyControl), ProxyError> {
-        let ca = generate_ca(&config.tls.ca_common_name)
-            .map_err(|err| ProxyError::Config(err.message))?;
+        let (ca, ca_paths) =
+            load_or_generate_ca(&config.tls.ca_cert_dir, &config.tls.ca_common_name)
+                .map_err(|err| ProxyError::Config(err.message))?;
         let cache = Mutex::new(CertCache::with_disk_path(1024, &config.tls.leaf_cert_dir));
         let (sender, events) = event_channel();
         let (control, control_rx) = control_channel();
-        let ca_paths = write_ca_to_dir(&config.tls.ca_cert_dir, &ca.material)
-            .map_err(|err| ProxyError::Runtime(err.message))?;
         Ok((
             Self {
                 state: Arc::new(ProxyState {

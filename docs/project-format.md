@@ -14,6 +14,10 @@ Crossfeed projects are stored as folders that contain configuration and data fil
 [timeline.body_limits_mb]
 request_max_mb = 40
 response_max_mb = 40
+
+[proxy]
+listen_host = "127.0.0.1"
+listen_port = 8888
 ```
 
 ## Database Schema (Draft)

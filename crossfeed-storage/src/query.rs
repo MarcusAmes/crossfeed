@@ -17,6 +17,8 @@ pub struct TimelineQuery {
     pub until: Option<String>,
     pub limit: usize,
     pub offset: usize,
+    pub after_started_at: Option<String>,
+    pub after_request_id: Option<i64>,
 }
 
 impl Default for TimelineQuery {
@@ -37,6 +39,8 @@ impl Default for TimelineQuery {
             until: None,
             limit: 100,
             offset: 0,
+            after_started_at: None,
+            after_request_id: None,
         }
     }
 }

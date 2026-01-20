@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+crossfeed-ingest = { path = "../crossfeed-ingest" }
+crossfeed-proxy = { path = "../crossfeed-proxy" }
 crossfeed-storage = { path = "../crossfeed-storage" }
 dirs = "5.0"
-iced = "0.13"
+iced = { version = "0.13", features = ["tokio"] }
 serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros"] }
 toml = "0.8"

@@ -17,7 +17,8 @@ pub use http2::{
 
 pub use tls::{
     CaCertificate, CaMaterial, CaMaterialPaths, CertCache, LeafCertificate, TlsConfig, TlsError,
-    TlsErrorKind, build_acceptor, generate_ca, generate_leaf_cert, write_ca_to_dir,
+    TlsErrorKind, build_acceptor, generate_ca, generate_leaf_cert, load_or_generate_ca,
+    write_ca_to_dir,
 };
 
 pub use socks::{

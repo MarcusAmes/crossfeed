@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use chrono::Datelike;
-use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType, IsCa};
+use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
 
 use super::types::{CaCertificate, CaMaterial, CaMaterialPaths, TlsError, TlsErrorKind};
 
@@ -76,4 +76,54 @@ pub fn write_ca_to_dir(
         cert_path,
         key_path,
     })
+}
+
+pub fn load_or_generate_ca(
+    dir: impl AsRef<Path>,
+    common_name: &str,
+) -> Result<(CaCertificate, CaMaterialPaths), TlsError> {
+    let dir = dir.as_ref();
+    let cert_path = dir.join("crossfeed-ca.pem");
+    let key_path = dir.join("crossfeed-ca-key.pem");
+    if cert_path.exists() && key_path.exists() {
+        let cert_pem =
+            fs::read(&cert_path).map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
+        let key_pem =
+            fs::read(&key_path).map_err(|err| TlsError::new(TlsErrorKind::Io, err.to_string()))?;
+        let cert = load_ca_certificate(&cert_pem, &key_pem)?;
+        let cert_der = cert
+            .serialize_der()
+            .map_err(|err| TlsError::new(TlsErrorKind::Rcgen, err.to_string()))?;
+        let key_der = cert.serialize_private_key_der();
+        let material = CaMaterial {
+            cert_pem,
+            key_pem,
+            cert_der,
+            key_der,
+        };
+        return Ok((
+            CaCertificate { material, cert },
+            CaMaterialPaths {
+                cert_path,
+                key_path,
+            },
+        ));
+    }
+
+    let ca = generate_ca(common_name)?;
+    let paths = write_ca_to_dir(dir, &ca.material)?;
+    Ok((ca, paths))
+}
+
+fn load_ca_certificate(cert_pem: &[u8], key_pem: &[u8]) -> Result<Certificate, TlsError> {
+    let cert_str = std::str::from_utf8(cert_pem)
+        .map_err(|err| TlsError::new(TlsErrorKind::Rcgen, err.to_string()))?;
+    let key_str = std::str::from_utf8(key_pem)
+        .map_err(|err| TlsError::new(TlsErrorKind::Rcgen, err.to_string()))?;
+    let key_pair = KeyPair::from_pem(key_str)
+        .map_err(|err| TlsError::new(TlsErrorKind::Rcgen, err.to_string()))?;
+    let params = CertificateParams::from_ca_cert_pem(cert_str, key_pair)
+        .map_err(|err| TlsError::new(TlsErrorKind::Rcgen, err.to_string()))?;
+    Certificate::from_params(params)
+        .map_err(|err| TlsError::new(TlsErrorKind::Rcgen, err.to_string()))
 }
