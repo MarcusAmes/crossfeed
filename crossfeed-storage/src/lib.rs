@@ -2,6 +2,9 @@ mod project;
 mod query;
 #[cfg(test)]
 mod query_test;
+mod replay;
+#[cfg(test)]
+mod replay_test;
 mod schema;
 mod sqlite;
 #[cfg(test)]
@@ -13,6 +16,7 @@ mod worker;
 
 pub use project::{BodyLimitsConfig, ProjectConfig, ProjectLayout, ProjectPaths, TimelineConfig};
 pub use query::{TimelineQuery, TimelineSort};
+pub use replay::{ReplayExecution, ReplayRequest, ReplayVersion};
 pub use schema::{SchemaCatalog, SchemaError, SchemaSpec, TableSpec};
 pub use sqlite::{FtsConfig, SqliteConfig, SqliteStore};
 pub use timeline::{

@@ -3,6 +3,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::query::{TimelineQuery, TimelineSort};
+use crate::replay::{ReplayExecution, ReplayRequest, ReplayVersion};
 use crate::schema::SchemaCatalog;
 use crate::timeline::{TimelineInsertResult, TimelineRequest, TimelineResponse, TimelineStore};
 
@@ -226,6 +227,139 @@ impl SqliteStore {
             .map_err(|err| err.to_string())?;
         Ok(self.conn.last_insert_rowid())
     }
+
+    fn insert_replay_request_inner(&self, request: &ReplayRequest) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO replay_requests (
+                    collection_id, source_timeline_request_id, name, method, scheme, host, port,
+                    path, query, url, http_version, request_headers, request_body, request_body_size,
+                    active_version_id, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![
+                    request.collection_id,
+                    request.source_timeline_request_id,
+                    request.name,
+                    request.method,
+                    request.scheme,
+                    request.host,
+                    request.port as i64,
+                    request.path,
+                    request.query,
+                    request.url,
+                    request.http_version,
+                    request.request_headers,
+                    request.request_body,
+                    request.request_body_size as i64,
+                    request.active_version_id,
+                    request.created_at,
+                    request.updated_at,
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    fn insert_replay_version_inner(&self, version: &ReplayVersion) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO replay_versions (
+                    replay_request_id, parent_id, label, created_at, method, scheme, host, port,
+                    path, query, url, http_version, request_headers, request_body, request_body_size
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    version.replay_request_id,
+                    version.parent_id,
+                    version.label,
+                    version.created_at,
+                    version.method,
+                    version.scheme,
+                    version.host,
+                    version.port as i64,
+                    version.path,
+                    version.query,
+                    version.url,
+                    version.http_version,
+                    version.request_headers,
+                    version.request_body,
+                    version.request_body_size as i64,
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    fn update_replay_request_active_version(
+        &self,
+        request_id: i64,
+        version_id: i64,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE replay_requests SET active_version_id = ?1, updated_at = ?2 WHERE id = ?3",
+                params![version_id, updated_at, request_id],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    fn upsert_replay_request_snapshot(
+        &self,
+        request_id: i64,
+        version: &ReplayVersion,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE replay_requests SET
+                    method = ?1,
+                    scheme = ?2,
+                    host = ?3,
+                    port = ?4,
+                    path = ?5,
+                    query = ?6,
+                    url = ?7,
+                    http_version = ?8,
+                    request_headers = ?9,
+                    request_body = ?10,
+                    request_body_size = ?11,
+                    updated_at = ?12
+                 WHERE id = ?13",
+                params![
+                    version.method,
+                    version.scheme,
+                    version.host,
+                    version.port as i64,
+                    version.path,
+                    version.query,
+                    version.url,
+                    version.http_version,
+                    version.request_headers,
+                    version.request_body,
+                    version.request_body_size as i64,
+                    updated_at,
+                    request_id,
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    fn insert_replay_execution_inner(&self, execution: &ReplayExecution) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO replay_executions (replay_request_id, timeline_request_id, executed_at)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    execution.replay_request_id,
+                    execution.timeline_request_id,
+                    execution.executed_at,
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(self.conn.last_insert_rowid())
+    }
 }
 
 impl TimelineStore for SqliteStore {
@@ -251,6 +385,36 @@ impl SqliteStore {
                 .map_err(|err| err.to_string())?;
         }
         Ok(())
+    }
+
+    pub fn create_replay_request(&self, request: &ReplayRequest) -> Result<i64, String> {
+        self.insert_replay_request_inner(request)
+    }
+
+    pub fn insert_replay_version(&self, version: &ReplayVersion) -> Result<i64, String> {
+        self.insert_replay_version_inner(version)
+    }
+
+    pub fn update_replay_active_version(
+        &self,
+        request_id: i64,
+        version_id: i64,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        self.update_replay_request_active_version(request_id, version_id, updated_at)
+    }
+
+    pub fn update_replay_snapshot(
+        &self,
+        request_id: i64,
+        version: &ReplayVersion,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        self.upsert_replay_request_snapshot(request_id, version, updated_at)
+    }
+
+    pub fn insert_replay_execution(&self, execution: &ReplayExecution) -> Result<i64, String> {
+        self.insert_replay_execution_inner(execution)
     }
 
     pub fn query_requests(

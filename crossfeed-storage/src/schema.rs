@@ -135,14 +135,17 @@ impl SchemaCatalog {
     request_headers BLOB NOT NULL,\
     request_body BLOB,\
     request_body_size INTEGER NOT NULL DEFAULT 0,\
+    active_version_id INTEGER REFERENCES replay_versions(id),\
     created_at TEXT NOT NULL,\
     updated_at TEXT NOT NULL\
-)"
+ )"
                     .to_string(),
                     indices: vec![
                         "CREATE INDEX idx_replay_requests_collection_id ON replay_requests(collection_id)"
                             .to_string(),
                         "CREATE INDEX idx_replay_requests_source_timeline_request_id ON replay_requests(source_timeline_request_id)"
+                            .to_string(),
+                        "CREATE INDEX idx_replay_requests_active_version_id ON replay_requests(active_version_id)"
                             .to_string(),
                     ],
                 },
