@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -35,6 +36,41 @@ pub struct SqliteConfig {
 pub struct SqliteStore {
     conn: Connection,
     config: SqliteConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineRequestSummary {
+    pub id: i64,
+    pub source: String,
+    pub method: String,
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub path: String,
+    pub query: Option<String>,
+    pub url: String,
+    pub http_version: String,
+    pub request_headers: Vec<u8>,
+    pub request_body: Vec<u8>,
+    pub request_body_size: usize,
+    pub request_body_truncated: bool,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub scope_status_at_capture: String,
+    pub scope_status_current: Option<String>,
+    pub scope_rules_version: i64,
+    pub capture_filtered: bool,
+    pub timeline_filtered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseSummary {
+    pub status_code: u16,
+    pub reason: Option<String>,
+    pub header_count: usize,
+    pub body_size: usize,
+    pub body_truncated: bool,
 }
 
 impl SqliteStore {
@@ -387,6 +423,62 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn get_request_tags(
+        &self,
+        request_ids: &[i64],
+    ) -> Result<HashMap<i64, Vec<String>>, String> {
+        if request_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = vec!["?"; request_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT req_tag.timeline_request_id, tag.name FROM timeline_request_tags req_tag \
+             JOIN tags tag ON tag.id = req_tag.tag_id \
+             WHERE req_tag.timeline_request_id IN ({placeholders})"
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(|err| err.to_string())?;
+        let params = rusqlite::params_from_iter(request_ids.iter());
+        let mut rows = statement.query(params).map_err(|err| err.to_string())?;
+        let mut results: HashMap<i64, Vec<String>> = HashMap::new();
+        while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+            let request_id: i64 = row.get(0).map_err(|err| err.to_string())?;
+            let tag: String = row.get(1).map_err(|err| err.to_string())?;
+            results.entry(request_id).or_default().push(tag);
+        }
+        Ok(results)
+    }
+
+    pub fn get_response_summaries(
+        &self,
+        request_ids: &[i64],
+    ) -> Result<HashMap<i64, ResponseSummary>, String> {
+        if request_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = vec!["?"; request_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT timeline_request_id, status_code, reason, response_headers, response_body_size, response_body_truncated \
+             FROM timeline_responses WHERE timeline_request_id IN ({placeholders})"
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(|err| err.to_string())?;
+        let params = rusqlite::params_from_iter(request_ids.iter());
+        let mut rows = statement.query(params).map_err(|err| err.to_string())?;
+        let mut results = HashMap::new();
+        while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+            let request_id: i64 = row.get(0).map_err(|err| err.to_string())?;
+            let headers: Vec<u8> = row.get(3).map_err(|err| err.to_string())?;
+            let summary = ResponseSummary {
+                status_code: row.get::<_, i64>(1).map_err(|err| err.to_string())? as u16,
+                reason: row.get(2).map_err(|err| err.to_string())?,
+                header_count: count_headers(&headers),
+                body_size: row.get::<_, i64>(4).map_err(|err| err.to_string())? as usize,
+                body_truncated: row.get::<_, i64>(5).map_err(|err| err.to_string())? != 0,
+            };
+            results.insert(request_id, summary);
+        }
+        Ok(results)
+    }
+
     pub fn create_replay_request(&self, request: &ReplayRequest) -> Result<i64, String> {
         self.insert_replay_request_inner(request)
     }
@@ -417,13 +509,13 @@ impl SqliteStore {
         self.insert_replay_execution_inner(execution)
     }
 
-    pub fn query_requests(
+    pub fn query_request_summaries(
         &self,
         query: &TimelineQuery,
         sort: TimelineSort,
-    ) -> Result<Vec<TimelineRequest>, String> {
+    ) -> Result<Vec<TimelineRequestSummary>, String> {
         let mut sql = String::from(
-            "SELECT DISTINCT source.name, req.method, req.scheme, req.host, req.port, req.path, req.query, req.url, req.http_version, req.request_headers, req.request_body, req.request_body_size, req.request_body_truncated, req.started_at, req.completed_at, req.duration_ms, req.scope_status_at_capture, req.scope_status_current, req.scope_rules_version, req.capture_filtered, req.timeline_filtered FROM timeline_requests req JOIN timeline_sources source ON req.source_id = source.id",
+            "SELECT DISTINCT req.id, source.name, req.method, req.scheme, req.host, req.port, req.path, req.query, req.url, req.http_version, req.request_headers, req.request_body, req.request_body_size, req.request_body_truncated, req.started_at, req.completed_at, req.duration_ms, req.scope_status_at_capture, req.scope_status_current, req.scope_rules_version, req.capture_filtered, req.timeline_filtered FROM timeline_requests req JOIN timeline_sources source ON req.source_id = source.id",
         );
         let mut where_clauses = Vec::new();
         let mut params: Vec<rusqlite::types::Value> = Vec::new();
@@ -522,7 +614,7 @@ impl SqliteStore {
         let mut statement = self.conn.prepare(&sql).map_err(|err| err.to_string())?;
         let rows = statement
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                parse_request_row(row)
+                parse_request_summary_row(row)
             })
             .map_err(|err| err.to_string())?;
         let mut results = Vec::new();
@@ -531,31 +623,123 @@ impl SqliteStore {
         }
         Ok(results)
     }
+
+    pub fn query_requests(
+        &self,
+        query: &TimelineQuery,
+        sort: TimelineSort,
+    ) -> Result<Vec<TimelineRequest>, String> {
+        let summaries = self.query_request_summaries(query, sort)?;
+        Ok(summaries.into_iter().map(TimelineRequest::from).collect())
+    }
+
+    pub fn get_request_summary(
+        &self,
+        request_id: i64,
+    ) -> Result<Option<TimelineRequestSummary>, String> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT req.id, source.name, req.method, req.scheme, req.host, req.port, req.path, req.query, req.url, req.http_version, req.request_headers, req.request_body, req.request_body_size, req.request_body_truncated, req.started_at, req.completed_at, req.duration_ms, req.scope_status_at_capture, req.scope_status_current, req.scope_rules_version, req.capture_filtered, req.timeline_filtered FROM timeline_requests req JOIN timeline_sources source ON req.source_id = source.id WHERE req.id = ?1",
+            )
+            .map_err(|err| err.to_string())?;
+        statement
+            .query_row([request_id], parse_request_summary_row)
+            .optional()
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn get_response_by_request_id(
+        &self,
+        request_id: i64,
+    ) -> Result<Option<TimelineResponse>, String> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT timeline_request_id, status_code, reason, response_headers, response_body, response_body_size, response_body_truncated, http_version, received_at FROM timeline_responses WHERE timeline_request_id = ?1",
+            )
+            .map_err(|err| err.to_string())?;
+        statement
+            .query_row([request_id], parse_response_row)
+            .optional()
+            .map_err(|err| err.to_string())
+    }
 }
 
 #[allow(dead_code)]
-pub fn parse_request_row(row: &Row<'_>) -> Result<TimelineRequest, rusqlite::Error> {
-    Ok(TimelineRequest {
-        source: row.get(0)?,
-        method: row.get(1)?,
-        scheme: row.get(2)?,
-        host: row.get(3)?,
-        port: row.get::<_, i64>(4)? as u16,
-        path: row.get(5)?,
-        query: row.get(6)?,
-        url: row.get(7)?,
-        http_version: row.get(8)?,
-        request_headers: row.get(9)?,
-        request_body: row.get(10)?,
-        request_body_size: row.get::<_, i64>(11)? as usize,
-        request_body_truncated: row.get::<_, i64>(12)? != 0,
-        started_at: row.get(13)?,
-        completed_at: row.get(14)?,
-        duration_ms: row.get(15)?,
-        scope_status_at_capture: row.get(16)?,
-        scope_status_current: row.get(17)?,
-        scope_rules_version: row.get(18)?,
-        capture_filtered: row.get::<_, i64>(19)? != 0,
-        timeline_filtered: row.get::<_, i64>(20)? != 0,
+impl From<TimelineRequestSummary> for TimelineRequest {
+    fn from(summary: TimelineRequestSummary) -> Self {
+        Self {
+            source: summary.source,
+            method: summary.method,
+            scheme: summary.scheme,
+            host: summary.host,
+            port: summary.port,
+            path: summary.path,
+            query: summary.query,
+            url: summary.url,
+            http_version: summary.http_version,
+            request_headers: summary.request_headers,
+            request_body: summary.request_body,
+            request_body_size: summary.request_body_size,
+            request_body_truncated: summary.request_body_truncated,
+            started_at: summary.started_at,
+            completed_at: summary.completed_at,
+            duration_ms: summary.duration_ms,
+            scope_status_at_capture: summary.scope_status_at_capture,
+            scope_status_current: summary.scope_status_current,
+            scope_rules_version: summary.scope_rules_version,
+            capture_filtered: summary.capture_filtered,
+            timeline_filtered: summary.timeline_filtered,
+        }
+    }
+}
+
+pub fn parse_request_summary_row(row: &Row<'_>) -> Result<TimelineRequestSummary, rusqlite::Error> {
+    Ok(TimelineRequestSummary {
+        id: row.get(0)?,
+        source: row.get(1)?,
+        method: row.get(2)?,
+        scheme: row.get(3)?,
+        host: row.get(4)?,
+        port: row.get::<_, i64>(5)? as u16,
+        path: row.get(6)?,
+        query: row.get(7)?,
+        url: row.get(8)?,
+        http_version: row.get(9)?,
+        request_headers: row.get(10)?,
+        request_body: row.get(11)?,
+        request_body_size: row.get::<_, i64>(12)? as usize,
+        request_body_truncated: row.get::<_, i64>(13)? != 0,
+        started_at: row.get(14)?,
+        completed_at: row.get(15)?,
+        duration_ms: row.get(16)?,
+        scope_status_at_capture: row.get(17)?,
+        scope_status_current: row.get(18)?,
+        scope_rules_version: row.get(19)?,
+        capture_filtered: row.get::<_, i64>(20)? != 0,
+        timeline_filtered: row.get::<_, i64>(21)? != 0,
     })
+}
+
+pub fn parse_response_row(row: &Row<'_>) -> Result<TimelineResponse, rusqlite::Error> {
+    Ok(TimelineResponse {
+        timeline_request_id: row.get(0)?,
+        status_code: row.get::<_, i64>(1)? as u16,
+        reason: row.get(2)?,
+        response_headers: row.get(3)?,
+        response_body: row.get(4)?,
+        response_body_size: row.get::<_, i64>(5)? as usize,
+        response_body_truncated: row.get::<_, i64>(6)? != 0,
+        http_version: row.get(7)?,
+        received_at: row.get(8)?,
+    })
+}
+
+fn count_headers(headers: &[u8]) -> usize {
+    if headers.is_empty() {
+        return 0;
+    }
+    let text = String::from_utf8_lossy(headers);
+    text.lines().filter(|line| !line.trim().is_empty()).count()
 }

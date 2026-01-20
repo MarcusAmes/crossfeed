@@ -60,7 +60,7 @@ impl Default for ProjectLayout {
     fn default() -> Self {
         Self {
             config_filename: "project.toml".to_string(),
-            database_filename: "db.sqlite".to_string(),
+            database_filename: "crossfeed.db".to_string(),
             exports_dirname: "exports".to_string(),
             logs_dirname: "logs".to_string(),
         }
@@ -102,7 +102,7 @@ mod tests {
     fn default_layout_uses_expected_names() {
         let layout = ProjectLayout::default();
         assert_eq!(layout.config_filename, "project.toml");
-        assert_eq!(layout.database_filename, "db.sqlite");
+        assert_eq!(layout.database_filename, "crossfeed.db");
         assert_eq!(layout.exports_dirname, "exports");
         assert_eq!(layout.logs_dirname, "logs");
     }
@@ -118,7 +118,7 @@ mod tests {
         );
         assert_eq!(
             paths.database,
-            std::path::Path::new("/tmp/crossfeed/db.sqlite")
+            std::path::Path::new("/tmp/crossfeed/crossfeed.db")
         );
         assert_eq!(
             paths.exports_dir,

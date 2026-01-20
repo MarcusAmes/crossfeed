@@ -5,7 +5,7 @@ Crossfeed projects are stored as folders that contain configuration and data fil
 
 ## Folder Layout (Draft)
 - `project.toml`: project configuration (scope, filters, UI layout, theme, fonts)
-- `db.sqlite`: SQLite database containing timeline, replay, and fuzzer data
+- `crossfeed.db`: SQLite database containing timeline, replay, and fuzzer data
 - `exports/`: user-triggered exports (optional)
 - `logs/`: diagnostic logs (optional)
 

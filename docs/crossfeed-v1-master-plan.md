@@ -116,7 +116,7 @@ Status: [x] Completed
 Status: [x] Completed
 **Goal:** Define folder-based project format and SQLite schema.
 **Includes:**
-- Project folder layout (`db.sqlite`, `project.json`, etc.).
+- Project folder layout (`crossfeed.db`, `project.toml`, etc.).
 - SQLite tables for requests, responses, metadata, tags, scope rules.
 - Indexes and WAL configuration defaults.
 - Migration strategy (even if v1 only).
