@@ -1,0 +1,22 @@
+[package]
+name = "crossfeed-fuzzer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-stream = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+crossfeed-codec = { path = "../crossfeed-codec" }
+crossfeed-storage = { path = "../crossfeed-storage" }
+hex = "0.4"
+futures-core = "0.3"
+
+[dev-dependencies]
+assert_matches = "1"
+futures-executor = "0.3"
+futures-util = "0.3"
