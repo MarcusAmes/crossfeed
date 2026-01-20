@@ -194,7 +194,7 @@ Status: [x] Completed
 ---
 
 ## Milestone 7: Replay Core
-Status: [ ] Completed
+Status: [x] Completed
 **Goal:** Primary v1 feature.
 **Includes:**
 - Request editor, resend, response view.
