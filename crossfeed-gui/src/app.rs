@@ -88,6 +88,7 @@ pub enum Message {
     ViewSubmenuHover(bool),
     ViewSubmenuBridgeHover(bool),
     ViewTabsRegionExit,
+    CloseMenu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,6 +381,14 @@ impl AppState {
                         self.view_submenu_bridge_hover = false;
                     }
                 }
+                Task::none()
+            }
+            Message::CloseMenu => {
+                self.active_menu = None;
+                self.view_tabs_open = false;
+                self.view_tabs_hover = false;
+                self.view_submenu_hover = false;
+                self.view_submenu_bridge_hover = false;
                 Task::none()
             }
             Message::OpenNewTabPrompt => {
@@ -705,6 +714,14 @@ impl AppState {
             });
         let base: Element<'a, Message> = base.into();
         let mut layers = vec![base];
+        if self.active_menu.is_some() {
+            let backdrop = mouse_area(container(Space::new(Length::Fill, Length::Fill)))
+                .on_press(Message::CloseMenu)
+                .on_right_press(Message::CloseMenu)
+                .interaction(mouse::Interaction::Pointer)
+                .into();
+            layers.push(backdrop);
+        }
         if let Some(overlay) = self.menu_overlay() {
             layers.push(overlay);
         }
