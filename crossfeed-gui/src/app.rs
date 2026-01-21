@@ -36,6 +36,8 @@ const TAB_BAR_SPACING: f32 = 8.0;
 const TAB_BUTTON_PADDING_X: f32 = 10.0;
 const TAB_BUTTON_PADDING_Y: f32 = 4.0;
 const TAB_CHAR_WIDTH: f32 = 7.5;
+const TAB_MAX_WIDTH: f32 = 200.0;
+const TAB_TEXT_FUDGE: f32 = 8.0;
 const VIEW_SUBMENU_GAP: f32 = 6.0;
 
 #[derive(Debug, Clone)]
@@ -923,8 +925,12 @@ impl AppState {
                 .as_deref()
                 .map(|id| id == tab.id)
                 .unwrap_or(false);
-            let label = text(tab.label.as_str()).size(13).color(self.theme.text);
-            let width = tab_button_width(tab.label.as_str());
+            let display_label = truncate_tab_label(tab.label.as_str(), TAB_MAX_WIDTH);
+            let label = text(display_label.clone())
+                .size(13)
+                .color(self.theme.text)
+                .wrapping(iced::widget::text::Wrapping::None);
+            let width = tab_button_width(&display_label).min(TAB_MAX_WIDTH);
             let button = iced::widget::button(label)
                 .padding([TAB_BUTTON_PADDING_Y, TAB_BUTTON_PADDING_X])
                 .width(Length::Fixed(width))
@@ -1309,7 +1315,27 @@ impl TabConfig {
 
 fn tab_button_width(label: &str) -> f32 {
     let text_width = label.chars().count() as f32 * TAB_CHAR_WIDTH;
-    text_width + TAB_BUTTON_PADDING_X * 2.0
+    text_width + TAB_BUTTON_PADDING_X * 2.0 + TAB_TEXT_FUDGE
+}
+
+fn truncate_tab_label(label: &str, max_width: f32) -> String {
+    let max_chars = ((max_width - TAB_BUTTON_PADDING_X * 2.0 - TAB_TEXT_FUDGE) / TAB_CHAR_WIDTH)
+        .floor()
+        .max(0.0) as usize;
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = label.chars().count();
+    if char_count <= max_chars {
+        return label.to_string();
+    }
+    let suffix = "...";
+    if max_chars <= suffix.len() {
+        return suffix[..max_chars.min(suffix.len())].to_string();
+    }
+    let take_len = max_chars.saturating_sub(suffix.len());
+    let truncated: String = label.chars().take(take_len).collect();
+    format!("{truncated}{suffix}")
 }
 
 fn default_layout_for(kind: TabKind) -> Option<PaneLayout> {
