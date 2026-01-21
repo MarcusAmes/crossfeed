@@ -630,7 +630,6 @@ where
             }
         }
         crossfeed_net::FramePayload::GoAway(goaway) => {
-            println!("ERROR: H2 send GOAWAY stream=0");
             let mut payload = Vec::with_capacity(8 + goaway.debug_data.len());
             payload.extend_from_slice(&(goaway.last_stream_id & 0x7FFF_FFFF).to_be_bytes());
             payload.extend_from_slice(&goaway.error_code.to_be_bytes());
@@ -2049,6 +2048,12 @@ async fn handle_http1(
     handle_http1_tcp(state, client, buffer).await
 }
 
+enum UpstreamWriteMode {
+    FullRequest,
+    HeadersOnly,
+    BodyOnly,
+}
+
 async fn handle_http1_tcp(
     state: Arc<ProxyState>,
     mut client: TcpStream,
@@ -2057,6 +2062,10 @@ async fn handle_http1_tcp(
     let request_limits = http1_request_limits(&state.config);
     let mut parser = RequestStreamParser::with_limits(request_limits);
     let mut request_bytes = Vec::new();
+    let mut expect_continue = false;
+    let mut expect_info: Option<crossfeed_net::RequestFrameInfo> = None;
+    let mut expect_header_end: Option<usize> = None;
+    let mut expect_upstream: Option<TcpStream> = None;
 
     loop {
         if buffer.is_empty() {
@@ -2089,28 +2098,120 @@ async fn handle_http1_tcp(
                             .await?;
                         return Ok(());
                     }
+                    expect_info = Some(info);
+                    expect_header_end = find_header_end(&request_bytes).map(|end| end + 4);
                 }
                 RequestStreamEvent::ExpectContinue => {
-                    client
-                        .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    client
-                        .flush()
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                    let request_intercept_enabled = {
+                        let intercepts = state.intercepts.lock().await;
+                        intercepts.is_request_intercept_enabled()
+                    };
+                    expect_continue = true;
+                    if !request_intercept_enabled {
+                        if expect_upstream.is_none() {
+                            let Some(info) = expect_info.clone() else {
+                                continue;
+                            };
+                            let Some(header_end) = expect_header_end else {
+                                continue;
+                            };
+                            let header_bytes = request_bytes[..header_end].to_vec();
+                            let request_stub = crossfeed_net::Request {
+                                line: crossfeed_net::RequestLine {
+                                    method: info.method.clone(),
+                                    target: info.target.clone(),
+                                    version: info.version.clone(),
+                                },
+                                headers: info.headers.clone(),
+                                body: Vec::new(),
+                            };
+                            let (host, port, _path) = resolve_target(
+                                &request_stub.line.target,
+                                &request_stub.headers,
+                            )
+                            .ok_or_else(|| ProxyError::Runtime("missing host".to_string()))?;
+                            let mut upstream =
+                                connect_upstream(&state.config, host.clone(), port).await?;
+                            upstream
+                                .write_all(&header_bytes)
+                                .await
+                                .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                            upstream
+                                .flush()
+                                .await
+                                .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                            if let Some(peek_bytes) = peek_upstream_response(
+                                &mut upstream,
+                                http1_response_limits(&state.config),
+                            )
+                            .await?
+                            {
+                                let response = read_response_streaming(
+                                    &mut upstream,
+                                    &mut client,
+                                    http1_response_limits(&state.config),
+                                    &request_stub,
+                                    Some(peek_bytes),
+                                )
+                                .await?;
+                                if response.should_close {
+                                    close_http1_connection(&mut client, Some(&mut upstream)).await;
+                                }
+                                return Ok(());
+                            }
+                            client
+                                .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                                .await
+                                .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                            client
+                                .flush()
+                                .await
+                                .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                            expect_upstream = Some(upstream);
+                        }
+                    }
                 }
                 RequestStreamEvent::EndOfMessage => {
                     let message = parse_http1_request(&request_bytes)?;
-                    handle_http1_request(
-                        Arc::clone(&state),
-                        &mut client,
-                        None::<&mut TcpStream>,
-                        message,
-                    )
-                    .await?;
+                    if expect_continue {
+                        if let Some(upstream) = expect_upstream.as_mut() {
+                            handle_http1_request(
+                                Arc::clone(&state),
+                                &mut client,
+                                Some(upstream),
+                                message,
+                                UpstreamWriteMode::BodyOnly,
+                                false,
+                            )
+                            .await?;
+                        } else {
+                            handle_http1_request(
+                                Arc::clone(&state),
+                                &mut client,
+                                None::<&mut TcpStream>,
+                                message,
+                                UpstreamWriteMode::FullRequest,
+                                true,
+                            )
+                            .await?;
+                        }
+                    } else {
+                        handle_http1_request(
+                            Arc::clone(&state),
+                            &mut client,
+                            None::<&mut TcpStream>,
+                            message,
+                            UpstreamWriteMode::FullRequest,
+                            false,
+                        )
+                        .await?;
+                    }
                     request_bytes.clear();
                     parser = RequestStreamParser::with_limits(request_limits);
+                    expect_continue = false;
+                    expect_info = None;
+                    expect_header_end = None;
+                    expect_upstream = None;
                 }
                 RequestStreamEvent::BodyBytes { .. } => {}
             }
@@ -2131,6 +2232,9 @@ where
     let request_limits = http1_request_limits(&state.config);
     let mut parser = RequestStreamParser::with_limits(request_limits);
     let mut request_bytes = Vec::new();
+    let mut expect_continue = false;
+    let mut expect_info: Option<crossfeed_net::RequestFrameInfo> = None;
+    let mut expect_header_end: Option<usize> = None;
 
     loop {
         if buffer.is_empty() {
@@ -2158,16 +2262,68 @@ where
                         .find(|header| header.name.eq_ignore_ascii_case("host"))
                         .map(|header| header.value.as_str())
                         .unwrap_or("");
+                    expect_info = Some(info);
+                    expect_header_end = find_header_end(&request_bytes).map(|end| end + 4);
                 }
                 RequestStreamEvent::ExpectContinue => {
-                    client
-                        .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    client
-                        .flush()
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                    let request_intercept_enabled = {
+                        let intercepts = state.intercepts.lock().await;
+                        intercepts.is_request_intercept_enabled()
+                    };
+                    expect_continue = true;
+                    if !request_intercept_enabled {
+                        let Some(info) = expect_info.clone() else {
+                            continue;
+                        };
+                        let Some(header_end) = expect_header_end else {
+                            continue;
+                        };
+                        let header_bytes = request_bytes[..header_end].to_vec();
+                        let request_stub = crossfeed_net::Request {
+                            line: crossfeed_net::RequestLine {
+                                method: info.method.clone(),
+                                target: info.target.clone(),
+                                version: info.version.clone(),
+                            },
+                            headers: info.headers.clone(),
+                            body: Vec::new(),
+                        };
+                        upstream
+                            .write_all(&header_bytes)
+                            .await
+                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        upstream
+                            .flush()
+                            .await
+                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        if let Some(peek_bytes) = peek_upstream_response(
+                            &mut upstream,
+                            http1_response_limits(&state.config),
+                        )
+                        .await?
+                        {
+                            let response = read_response_streaming(
+                                &mut upstream,
+                                &mut client,
+                                http1_response_limits(&state.config),
+                                &request_stub,
+                                Some(peek_bytes),
+                            )
+                            .await?;
+                            if response.should_close {
+                                close_http1_connection(&mut client, Some(&mut upstream)).await;
+                            }
+                            return Ok(());
+                        }
+                        client
+                            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                            .await
+                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        client
+                            .flush()
+                            .await
+                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                    }
                 }
                 RequestStreamEvent::EndOfMessage => {
                     let message = parse_http1_request(&request_bytes)?;
@@ -2176,10 +2332,19 @@ where
                         &mut client,
                         Some(&mut upstream),
                         message,
+                        if expect_continue {
+                            UpstreamWriteMode::BodyOnly
+                        } else {
+                            UpstreamWriteMode::FullRequest
+                        },
+                        expect_continue,
                     )
                     .await?;
                     request_bytes.clear();
                     parser = RequestStreamParser::with_limits(request_limits);
+                    expect_continue = false;
+                    expect_info = None;
+                    expect_header_end = None;
                 }
                 RequestStreamEvent::BodyBytes { .. } => {}
             }
@@ -2192,6 +2357,8 @@ async fn handle_http1_request<C, U>(
     client: &mut C,
     mut upstream: Option<&mut U>,
     message: crossfeed_net::Request,
+    write_mode: UpstreamWriteMode,
+    expect_continue: bool,
 ) -> Result<(), ProxyError>
 where
     C: AsyncRead + AsyncWrite + Unpin,
@@ -2250,46 +2417,78 @@ where
 
             if !response_intercept_enabled {
                 let limits = http1_response_limits(&state.config);
-                let log_context = ();
                 let streamed = match upstream.as_mut() {
                     Some(upstream) => {
                         log_http1_upstream_send(request_id, &host, port, true);
-                        upstream
-                            .write_all(&proxy_request.raw_request)
-                            .await
-                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        if expect_continue && matches!(write_mode, UpstreamWriteMode::FullRequest) {
+                            let header_write = write_http1_request(
+                                upstream,
+                                &proxy_request.raw_request,
+                                UpstreamWriteMode::HeadersOnly,
+                            )
+                            .await;
+                            if header_write.is_ok() {
+                                upstream
+                                    .flush()
+                                    .await
+                                    .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                                if let Some(peek_bytes) = peek_upstream_response(
+                                    upstream,
+                                    http1_response_limits(&state.config),
+                                )
+                                .await?
+                                {
+                                    let response = read_response_streaming(
+                                        upstream,
+                                        client,
+                                        limits,
+                                        &message,
+                                        Some(peek_bytes),
+                                    )
+                                    .await?;
+                                    if response.should_close {
+                                        close_http1_connection(client, Some(upstream)).await;
+                                    }
+                                    return Ok(());
+                                }
+                                client
+                                    .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                                    .await
+                                    .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                            }
+                        }
+                        write_http1_request(
+                            upstream,
+                            &proxy_request.raw_request,
+                            if expect_continue {
+                                UpstreamWriteMode::BodyOnly
+                            } else {
+                                write_mode
+                            },
+                        )
+                        .await?;
                         upstream
                             .flush()
                             .await
                             .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                        read_response_streaming(
-                            upstream,
-                            client,
-                            limits,
-                            &message,
-                            &log_context,
-                        )
+                        read_response_streaming(upstream, client, limits, &message, None)
                         .await?
                     }
                     None => {
                         let mut upstream =
                             connect_upstream(&state.config, host.clone(), port).await?;
                         log_http1_upstream_send(request_id, &host, port, false);
-                        upstream
-                            .write_all(&proxy_request.raw_request)
-                            .await
-                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        write_http1_request(
+                            &mut upstream,
+                            &proxy_request.raw_request,
+                            write_mode,
+                        )
+                        .await?;
                         upstream
                             .flush()
                             .await
                             .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                        read_response_streaming(
-                            &mut upstream,
-                            client,
-                            limits,
-                            &message,
-                            &log_context,
-                        )
+                        read_response_streaming(&mut upstream, client, limits, &message, None)
                         .await?
                     }
                 };
@@ -2327,29 +2526,70 @@ where
             let response_bytes = match upstream.as_mut() {
                 Some(upstream) => {
                     log_http1_upstream_send(request_id, &host, port, true);
-                    upstream
-                        .write_all(&proxy_request.raw_request)
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    upstream
-                        .flush()
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    read_response_stream(upstream, http1_response_limits(&state.config)).await?
+                    let (early_response, effective_write_mode) = if expect_continue
+                        && matches!(write_mode, UpstreamWriteMode::FullRequest)
+                    {
+                        handle_expect_continue(
+                            upstream,
+                            client,
+                            &proxy_request.raw_request,
+                            http1_response_limits(&state.config),
+                            true,
+                        )
+                        .await?
+                    } else {
+                        (None, write_mode)
+                    };
+                    if let Some(early_response) = early_response {
+                        early_response
+                    } else {
+                        write_http1_request(
+                            upstream,
+                            &proxy_request.raw_request,
+                            effective_write_mode,
+                        )
+                        .await?;
+                        upstream
+                            .flush()
+                            .await
+                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        read_response_stream(upstream, http1_response_limits(&state.config))
+                            .await?
+                    }
                 }
                 None => {
                     let mut upstream = connect_upstream(&state.config, host.clone(), port).await?;
                     log_http1_upstream_send(request_id, &host, port, false);
-                    upstream
-                        .write_all(&proxy_request.raw_request)
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    upstream
-                        .flush()
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    read_response_stream(&mut upstream, http1_response_limits(&state.config))
+                    let (early_response, effective_write_mode) = if expect_continue
+                        && matches!(write_mode, UpstreamWriteMode::FullRequest)
+                    {
+                        handle_expect_continue(
+                            &mut upstream,
+                            client,
+                            &proxy_request.raw_request,
+                            http1_response_limits(&state.config),
+                            true,
+                        )
                         .await?
+                    } else {
+                        (None, write_mode)
+                    };
+                    if let Some(early_response) = early_response {
+                        early_response
+                    } else {
+                        write_http1_request(
+                            &mut upstream,
+                            &proxy_request.raw_request,
+                            effective_write_mode,
+                        )
+                        .await?;
+                        upstream
+                            .flush()
+                            .await
+                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        read_response_stream(&mut upstream, http1_response_limits(&state.config))
+                            .await?
+                    }
                 }
             };
 
@@ -2396,46 +2636,78 @@ where
 
             if !response_intercept_enabled {
                 let limits = http1_response_limits(&state.config);
-                let log_context = ();
                 let streamed = match upstream.as_mut() {
                     Some(upstream) => {
                         log_http1_upstream_send(request_id, &host, port, true);
-                        upstream
-                            .write_all(&proxy_request.raw_request)
-                            .await
-                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        if expect_continue && matches!(write_mode, UpstreamWriteMode::FullRequest) {
+                            let header_write = write_http1_request(
+                                upstream,
+                                &proxy_request.raw_request,
+                                UpstreamWriteMode::HeadersOnly,
+                            )
+                            .await;
+                            if header_write.is_ok() {
+                                upstream
+                                    .flush()
+                                    .await
+                                    .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                                if let Some(peek_bytes) = peek_upstream_response(
+                                    upstream,
+                                    http1_response_limits(&state.config),
+                                )
+                                .await?
+                                {
+                                    let response = read_response_streaming(
+                                        upstream,
+                                        client,
+                                        limits,
+                                        &message,
+                                        Some(peek_bytes),
+                                    )
+                                    .await?;
+                                    if response.should_close {
+                                        close_http1_connection(client, Some(upstream)).await;
+                                    }
+                                    return Ok(());
+                                }
+                                client
+                                    .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                                    .await
+                                    .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                            }
+                        }
+                        write_http1_request(
+                            upstream,
+                            &proxy_request.raw_request,
+                            if expect_continue {
+                                UpstreamWriteMode::BodyOnly
+                            } else {
+                                write_mode
+                            },
+                        )
+                        .await?;
                         upstream
                             .flush()
                             .await
                             .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                        read_response_streaming(
-                            upstream,
-                            client,
-                            limits,
-                            &message,
-                            &log_context,
-                        )
+                        read_response_streaming(upstream, client, limits, &message, None)
                         .await?
                     }
                     None => {
                         let mut upstream =
                             connect_upstream(&state.config, host.clone(), port).await?;
                         log_http1_upstream_send(request_id, &host, port, false);
-                        upstream
-                            .write_all(&proxy_request.raw_request)
-                            .await
-                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        write_http1_request(
+                            &mut upstream,
+                            &proxy_request.raw_request,
+                            write_mode,
+                        )
+                        .await?;
                         upstream
                             .flush()
                             .await
                             .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                        read_response_streaming(
-                            &mut upstream,
-                            client,
-                            limits,
-                            &message,
-                            &log_context,
-                        )
+                        read_response_streaming(&mut upstream, client, limits, &message, None)
                         .await?
                     }
                 };
@@ -2473,29 +2745,70 @@ where
             let response_bytes = match upstream.as_mut() {
                 Some(upstream) => {
                     log_http1_upstream_send(request_id, &host, port, true);
-                    upstream
-                        .write_all(&proxy_request.raw_request)
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    upstream
-                        .flush()
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    read_response_stream(upstream, http1_response_limits(&state.config)).await?
+                    let (early_response, effective_write_mode) = if expect_continue
+                        && matches!(write_mode, UpstreamWriteMode::FullRequest)
+                    {
+                        handle_expect_continue(
+                            upstream,
+                            client,
+                            &proxy_request.raw_request,
+                            http1_response_limits(&state.config),
+                            true,
+                        )
+                        .await?
+                    } else {
+                        (None, write_mode)
+                    };
+                    if let Some(early_response) = early_response {
+                        early_response
+                    } else {
+                        write_http1_request(
+                            upstream,
+                            &proxy_request.raw_request,
+                            effective_write_mode,
+                        )
+                        .await?;
+                        upstream
+                            .flush()
+                            .await
+                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        read_response_stream(upstream, http1_response_limits(&state.config))
+                            .await?
+                    }
                 }
                 None => {
                     let mut upstream = connect_upstream(&state.config, host.clone(), port).await?;
                     log_http1_upstream_send(request_id, &host, port, false);
-                    upstream
-                        .write_all(&proxy_request.raw_request)
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    upstream
-                        .flush()
-                        .await
-                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    read_response_stream(&mut upstream, http1_response_limits(&state.config))
+                    let (early_response, effective_write_mode) = if expect_continue
+                        && matches!(write_mode, UpstreamWriteMode::FullRequest)
+                    {
+                        handle_expect_continue(
+                            &mut upstream,
+                            client,
+                            &proxy_request.raw_request,
+                            http1_response_limits(&state.config),
+                            true,
+                        )
                         .await?
+                    } else {
+                        (None, write_mode)
+                    };
+                    if let Some(early_response) = early_response {
+                        early_response
+                    } else {
+                        write_http1_request(
+                            &mut upstream,
+                            &proxy_request.raw_request,
+                            effective_write_mode,
+                        )
+                        .await?;
+                        upstream
+                            .flush()
+                            .await
+                            .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                        read_response_stream(&mut upstream, http1_response_limits(&state.config))
+                            .await?
+                    }
                 }
             };
 
@@ -2606,6 +2919,84 @@ fn http1_request_limits(config: &ProxyConfig) -> crossfeed_net::Limits {
         max_header_bytes: config.http1_max_header_bytes,
         max_body_bytes: config.body_limits.request_max_bytes,
     }
+}
+
+async fn write_http1_request<S>(
+    stream: &mut S,
+    raw_request: &[u8],
+    mode: UpstreamWriteMode,
+) -> Result<(), ProxyError>
+where
+    S: AsyncWrite + Unpin,
+{
+    match mode {
+        UpstreamWriteMode::FullRequest => {
+            stream
+                .write_all(raw_request)
+                .await
+                .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+        }
+        UpstreamWriteMode::HeadersOnly => {
+            if let Some(header_end) = find_header_end(raw_request) {
+                let header_end = header_end + 4;
+                stream
+                    .write_all(&raw_request[..header_end])
+                    .await
+                    .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+            }
+        }
+        UpstreamWriteMode::BodyOnly => {
+            if let Some(header_end) = find_header_end(raw_request) {
+                let body_start = header_end + 4;
+                if body_start < raw_request.len() {
+                    stream
+                        .write_all(&raw_request[body_start..])
+                        .await
+                        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_expect_continue<S, C>(
+    upstream: &mut S,
+    client: &mut C,
+    raw_request: &[u8],
+    limits: crossfeed_net::Limits,
+    expect_continue: bool,
+) -> Result<(Option<Vec<u8>>, UpstreamWriteMode), ProxyError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    C: AsyncRead + AsyncWrite + Unpin,
+{
+    if !expect_continue {
+        return Ok((None, UpstreamWriteMode::FullRequest));
+    }
+
+    write_http1_request(upstream, raw_request, UpstreamWriteMode::HeadersOnly).await?;
+    upstream
+        .flush()
+        .await
+        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+
+    if let Some(peek_bytes) = peek_upstream_response(upstream, limits).await? {
+        let response_bytes = read_response_buffered_with_initial(upstream, limits, peek_bytes)
+            .await?;
+        return Ok((Some(response_bytes), UpstreamWriteMode::HeadersOnly));
+    }
+
+    client
+        .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+        .await
+        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+    client
+        .flush()
+        .await
+        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+
+    Ok((None, UpstreamWriteMode::BodyOnly))
 }
 
 fn http1_response_limits(config: &ProxyConfig) -> crossfeed_net::Limits {
@@ -3015,7 +3406,7 @@ async fn read_response_streaming<S, C>(
     client: &mut C,
     limits: crossfeed_net::Limits,
     request: &crossfeed_net::Request,
-    _log_context: &(),
+    initial: Option<Vec<u8>>,
 ) -> Result<StreamedHttp1Response, ProxyError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -3029,6 +3420,38 @@ where
     let mut should_close = false;
     let mut end_reason = StreamEndReason::ParseError;
     let mut upstream_incomplete = false;
+
+    if let Some(initial_bytes) = initial {
+        if !initial_bytes.is_empty() {
+            client
+                .write_all(&initial_bytes)
+                .await
+                .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+            if response.len() < capture_limit {
+                let remaining = capture_limit - response.len();
+                let to_copy = remaining.min(initial_bytes.len());
+                response.extend_from_slice(&initial_bytes[..to_copy]);
+            }
+            let events = parser
+                .push(&initial_bytes)
+                .map_err(|error| ProxyError::Runtime(format!("response parse error {error:?}")))?;
+            for event in events {
+                match event {
+                    ResponseStreamEvent::Headers(info) => {
+                        should_close = should_close_from_frame(request, &info);
+                        frame_info = Some(info);
+                    }
+                ResponseStreamEvent::EndOfMessage => {
+                    return Ok(StreamedHttp1Response {
+                        bytes: response,
+                        should_close,
+                        });
+                    }
+                    ResponseStreamEvent::BodyBytes { .. } => {}
+                }
+            }
+        }
+    }
 
     loop {
         let n = upstream.read(&mut buffer).await?;
@@ -3161,8 +3584,101 @@ where
     Ok(response)
 }
 
+async fn read_response_buffered_with_initial<S>(
+    stream: &mut S,
+    limits: crossfeed_net::Limits,
+    initial: Vec<u8>,
+) -> Result<Vec<u8>, ProxyError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut parser = ResponseStreamParser::with_limits(limits);
+    let mut response = initial;
+    let mut buffer = vec![0u8; 8192];
+
+    let events = parser
+        .push(&response)
+        .map_err(|error| ProxyError::Runtime(format!("response parse error {error:?}")))?;
+    if events
+        .iter()
+        .any(|event| matches!(event, ResponseStreamEvent::EndOfMessage))
+    {
+        return Ok(response);
+    }
+
+    loop {
+        let n = stream.read(&mut buffer).await?;
+        if n == 0 {
+            let events = parser
+                .push_eof()
+                .map_err(|error| ProxyError::Runtime(format!("response parse error {error:?}")))?;
+            if events
+                .iter()
+                .any(|event| matches!(event, ResponseStreamEvent::EndOfMessage))
+            {
+                return Ok(response);
+            }
+            return Err(ProxyError::Runtime("response incomplete".to_string()));
+        }
+        response.extend_from_slice(&buffer[..n]);
+        let events = parser
+            .push(&buffer[..n])
+            .map_err(|error| ProxyError::Runtime(format!("response parse error {error:?}")))?;
+        if events
+            .iter()
+            .any(|event| matches!(event, ResponseStreamEvent::EndOfMessage))
+        {
+            return Ok(response);
+        }
+    }
+}
+
+async fn peek_upstream_response<S>(
+    stream: &mut S,
+    limits: crossfeed_net::Limits,
+) -> Result<Option<Vec<u8>>, ProxyError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut buffer = vec![0u8; 8192];
+    let read_result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        stream.read(&mut buffer),
+    )
+    .await;
+
+    let Ok(Ok(n)) = read_result else {
+        return Ok(None);
+    };
+    if n == 0 {
+        return Ok(Some(Vec::new()));
+    }
+    buffer.truncate(n);
+
+    let mut parser = ResponseStreamParser::with_limits(limits);
+    let events = parser
+        .push(&buffer)
+        .map_err(|error| ProxyError::Runtime(format!("response parse error {error:?}")))?;
+    for event in events {
+        if let ResponseStreamEvent::Headers(info) = event {
+            if info.status_code != 100 {
+                return Ok(Some(buffer));
+            }
+            return Ok(None);
+        }
+    }
+
+    Ok(None)
+}
+
 fn response_has_length(headers: &[crossfeed_net::Header]) -> bool {
     has_content_length(headers) || has_chunked_transfer_encoding(headers)
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(b"\r\n\r\n".len())
+        .position(|window| window == b"\r\n\r\n")
 }
 
 fn request_should_close(request: &crossfeed_net::Request) -> bool {
