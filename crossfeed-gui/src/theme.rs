@@ -197,6 +197,29 @@ pub fn menu_item_button_style(
     }
 }
 
+pub fn tab_button_style(
+    theme: ThemePalette,
+    status: iced::widget::button::Status,
+    active: bool,
+) -> iced::widget::button::Style {
+    let base = if active { theme.accent } else { theme.surface };
+    let background = match status {
+        iced::widget::button::Status::Hovered => theme.header,
+        iced::widget::button::Status::Pressed => theme.accent,
+        _ => base,
+    };
+    iced::widget::button::Style {
+        text_color: theme.text,
+        background: Some(Background::Color(background)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
 pub fn pane_border_style(theme: ThemePalette) -> iced::widget::container::Style {
     iced::widget::container::Style {
         text_color: None,

@@ -258,7 +258,7 @@ impl TimelineState {
         self.selected = Some(prev);
     }
 
-    fn snapshot_layout(&self) -> PaneLayout {
+    pub fn snapshot_layout(&self) -> PaneLayout {
         PaneLayout::from(&self.panes)
     }
 
@@ -379,6 +379,17 @@ impl LayoutAxis {
             LayoutAxis::Vertical => pane_grid::Axis::Vertical,
         }
     }
+}
+
+pub fn default_pane_layout() -> PaneLayout {
+    let (mut panes, root) = pane_grid::State::new(PaneKind::Timeline);
+    let (right, _) = panes
+        .split(pane_grid::Axis::Vertical, root, PaneKind::Detail)
+        .expect("Default timeline split failed");
+    let _ = panes
+        .split(pane_grid::Axis::Horizontal, right, PaneKind::Response)
+        .expect("Default timeline split failed");
+    PaneLayout::from(&panes)
 }
 
 fn timeline_row(
