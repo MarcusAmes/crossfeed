@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crossfeed_codec::{deflate_decompress, gzip_decompress};
 use crossfeed_ingest::{
     ProjectContext, ProxyRuntimeConfig, TailCursor, TailUpdate, TimelineItem,
     open_or_create_project, start_proxy, tail_query,
@@ -711,24 +712,40 @@ impl TimelineState {
             let response = self.responses.get(&selected.id);
 
             if let Some(response) = response {
-                let store = SqliteStore::open(&self.store_path).ok();
-                let body = store
+                let timeline_response = SqliteStore::open(&self.store_path)
+                    .ok()
                     .and_then(|store| store.get_response_by_request_id(selected.id).ok())
-                    .and_then(|opt| opt)
-                    .map(|resp| resp.response_body)
-                    .unwrap_or_default();
-                let preview = response_preview(&body);
+                    .and_then(|opt| opt);
+                let response_headers = timeline_response
+                    .as_ref()
+                    .map(|resp| resp.response_headers.as_slice())
+                    .unwrap_or(&[]);
+                let body = timeline_response
+                    .as_ref()
+                    .map(|resp| resp.response_body.as_slice())
+                    .unwrap_or(&[]);
+                let headers = render_response_headers(response_headers);
+                let body_text = render_response_body(body, &headers);
                 let status_line = response
                     .reason
                     .clone()
                     .map(|reason| format!("{} {reason}", response.status_code))
                     .unwrap_or_else(|| response.status_code.to_string());
-                let header_count = response.header_count.to_string();
+                let body_label = if timeline_response
+                    .as_ref()
+                    .map(|resp| resp.response_body_truncated)
+                    .unwrap_or(false)
+                {
+                    "Body (truncated)"
+                } else {
+                    "Body"
+                };
                 column![
                     detail_line("Status", status_line),
-                    detail_line("Headers", header_count),
-                    text("Body preview").size(14),
-                    container(text(preview)).padding(10),
+                    text("Headers").size(14),
+                    container(text(headers)).padding(10),
+                    text(body_label).size(14),
+                    container(text(body_text)).padding(10),
                 ]
             } else {
                 column![text("No response recorded yet").size(16)]
@@ -1085,12 +1102,77 @@ fn format_bytes(bytes: usize, truncated: bool) -> String {
     }
 }
 
-fn response_preview(body: &[u8]) -> String {
+fn render_response_headers(raw: &[u8]) -> String {
+    if raw.is_empty() {
+        return "(no headers)".to_string();
+    }
+    let header_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 2)
+        .unwrap_or(raw.len());
+    let header_bytes = &raw[..header_end];
+    let text = String::from_utf8_lossy(header_bytes).replace("\r\n", "\n");
+    if text.trim().is_empty() {
+        "(no headers)".to_string()
+    } else {
+        text
+    }
+}
+
+fn render_response_body(body: &[u8], headers: &str) -> String {
     if body.is_empty() {
         return "(empty body)".to_string();
     }
-    match std::str::from_utf8(body) {
-        Ok(text) => text.chars().take(400).collect(),
-        Err(_) => format!("binary ({} bytes)", body.len()),
+    let decoded = decode_response_body(body, headers);
+    match std::str::from_utf8(&decoded) {
+        Ok(text) => text.to_string(),
+        Err(_) => hex_dump(&decoded),
     }
+}
+
+fn decode_response_body(body: &[u8], headers: &str) -> Vec<u8> {
+    let encoding = find_header_value(headers, "content-encoding")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let encoding = encoding
+        .split(',')
+        .next()
+        .map(|value| value.trim())
+        .unwrap_or("");
+    match encoding {
+        "gzip" | "x-gzip" => gzip_decompress(body).unwrap_or_else(|_| body.to_vec()),
+        "deflate" => deflate_decompress(body).unwrap_or_else(|_| body.to_vec()),
+        _ => body.to_vec(),
+    }
+}
+
+fn find_header_value(headers: &str, name: &str) -> Option<String> {
+    headers.lines().skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.trim().eq_ignore_ascii_case(name) {
+            Some(value.trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn hex_dump(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "(empty body)".to_string();
+    }
+    let mut output = String::new();
+    for (line_index, chunk) in bytes.chunks(16).enumerate() {
+        if line_index > 0 {
+            output.push('\n');
+        }
+        for (index, byte) in chunk.iter().enumerate() {
+            if index > 0 {
+                output.push(' ');
+            }
+            output.push_str(&format!("{:02x}", byte));
+        }
+    }
+    output
 }
