@@ -20,6 +20,7 @@ pub struct ProxyProjectConfig {
     pub listen_host: String,
     pub listen_port: u16,
     pub protocol_mode: ProxyProtocolMode,
+    pub http1_max_header_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +76,7 @@ impl Default for ProxyProjectConfig {
             listen_host: "127.0.0.1".to_string(),
             listen_port: 8888,
             protocol_mode: ProxyProtocolMode::Auto,
+            http1_max_header_bytes: 256 * 1024,
         }
     }
 }

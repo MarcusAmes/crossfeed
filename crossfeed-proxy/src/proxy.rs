@@ -2037,7 +2037,8 @@ async fn handle_http1_tcp(
     mut client: TcpStream,
     mut buffer: Vec<u8>,
 ) -> Result<(), ProxyError> {
-    let mut parser = RequestParser::new();
+    let request_limits = http1_request_limits(&state.config);
+    let mut parser = RequestParser::with_limits(request_limits);
 
     loop {
         if buffer.is_empty() {
@@ -2087,7 +2088,8 @@ where
     C: AsyncRead + AsyncWrite + Unpin,
     U: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut parser = RequestParser::new();
+    let request_limits = http1_request_limits(&state.config);
+    let mut parser = RequestParser::with_limits(request_limits);
 
     loop {
         if buffer.is_empty() {
@@ -2185,7 +2187,7 @@ where
                         .flush()
                         .await
                         .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    read_response_stream(upstream).await?
+                    read_response_stream(upstream, http1_response_limits(&state.config)).await?
                 }
                 None => {
                     let mut upstream = connect_upstream(&state.config, host.clone(), port).await?;
@@ -2197,13 +2199,15 @@ where
                         .flush()
                         .await
                         .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    read_response_stream(&mut upstream).await?
+                    read_response_stream(&mut upstream, http1_response_limits(&state.config))
+                        .await?
                 }
             };
 
             (
                 Some(proxy_request),
-                parse_response(&response_bytes, &started_at).map(|timeline_response| {
+                parse_response(&response_bytes, &started_at, http1_response_limits(&state.config))
+                    .map(|timeline_response| {
                     ProxyResponse {
                         id: Uuid::new_v4(),
                         timeline: timeline_response,
@@ -2253,7 +2257,7 @@ where
                         .flush()
                         .await
                         .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    read_response_stream(upstream).await?
+                    read_response_stream(upstream, http1_response_limits(&state.config)).await?
                 }
                 None => {
                     let mut upstream = connect_upstream(&state.config, host.clone(), port).await?;
@@ -2265,13 +2269,15 @@ where
                         .flush()
                         .await
                         .map_err(|err| ProxyError::Runtime(err.to_string()))?;
-                    read_response_stream(&mut upstream).await?
+                    read_response_stream(&mut upstream, http1_response_limits(&state.config))
+                        .await?
                 }
             };
 
             (
                 Some(proxy_request),
-                parse_response(&response_bytes, &started_at).map(|timeline_response| {
+                parse_response(&response_bytes, &started_at, http1_response_limits(&state.config))
+                    .map(|timeline_response| {
                     ProxyResponse {
                         id: Uuid::new_v4(),
                         timeline: timeline_response,
@@ -2350,6 +2356,20 @@ where
     }
 
     Ok(())
+}
+
+fn http1_request_limits(config: &ProxyConfig) -> crossfeed_net::Limits {
+    crossfeed_net::Limits {
+        max_header_bytes: config.http1_max_header_bytes,
+        max_body_bytes: config.body_limits.request_max_bytes,
+    }
+}
+
+fn http1_response_limits(config: &ProxyConfig) -> crossfeed_net::Limits {
+    crossfeed_net::Limits {
+        max_header_bytes: config.http1_max_header_bytes,
+        max_body_bytes: config.body_limits.response_max_bytes,
+    }
 }
 
 async fn handle_connect<S>(
@@ -2686,13 +2706,17 @@ async fn connect_via_socks(
     Ok(stream)
 }
 
-async fn read_response_stream<S>(stream: &mut S) -> Result<Vec<u8>, ProxyError>
+async fn read_response_stream<S>(
+    stream: &mut S,
+    limits: crossfeed_net::Limits,
+) -> Result<Vec<u8>, ProxyError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut parser = ResponseParser::new();
+    let mut parser = ResponseParser::with_limits(limits);
     let mut buffer = vec![0u8; 8192];
     let mut response = Vec::new();
+    let mut read_until_eof = false;
 
     loop {
         let n = stream.read(&mut buffer).await?;
@@ -2700,15 +2724,24 @@ where
             break;
         }
         response.extend_from_slice(&buffer[..n]);
+        if read_until_eof {
+            continue;
+        }
         match parser.push(&buffer[..n]) {
-            crossfeed_net::ParseStatus::NeedMore { .. } => {
-                continue;
-            }
-            crossfeed_net::ParseStatus::Complete { .. } => {
-                break;
+            crossfeed_net::ParseStatus::NeedMore { .. } => continue,
+            crossfeed_net::ParseStatus::Complete { message, .. } => {
+                let has_length = response_has_length(&message.headers);
+                if has_length || status_has_no_body(message.line.status_code) {
+                    break;
+                }
+                read_until_eof = true;
             }
             crossfeed_net::ParseStatus::Error { error, .. } => {
                 if matches!(error.kind, crossfeed_net::ParseErrorKind::UnexpectedEof) {
+                    continue;
+                }
+                if matches!(error.kind, crossfeed_net::ParseErrorKind::HeaderTooLarge) {
+                    read_until_eof = true;
                     continue;
                 }
                 return Err(ProxyError::Runtime(format!(
@@ -2719,11 +2752,34 @@ where
     }
 
     if response.is_empty() {
-        println!("ERROR: empty response from upstream");
         return Ok(response);
     }
 
     Ok(response)
+}
+
+fn response_has_length(headers: &[crossfeed_net::Header]) -> bool {
+    has_content_length(headers) || has_chunked_transfer_encoding(headers)
+}
+
+fn has_content_length(headers: &[crossfeed_net::Header]) -> bool {
+    headers
+        .iter()
+        .any(|header| header.name.eq_ignore_ascii_case("content-length"))
+}
+
+fn has_chunked_transfer_encoding(headers: &[crossfeed_net::Header]) -> bool {
+    headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("transfer-encoding")
+            && header
+                .value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+    })
+}
+
+fn status_has_no_body(status_code: u16) -> bool {
+    status_code / 100 == 1 || status_code == 204 || status_code == 304
 }
 
 fn resolve_target(
@@ -2830,8 +2886,12 @@ fn build_request_record(
     (timeline_request, request_headers)
 }
 
-fn parse_response(response_bytes: &[u8], received_at: &str) -> Option<TimelineResponse> {
-    let mut parser = ResponseParser::new();
+fn parse_response(
+    response_bytes: &[u8],
+    received_at: &str,
+    limits: crossfeed_net::Limits,
+) -> Option<TimelineResponse> {
+    let mut parser = ResponseParser::with_limits(limits);
     let status = parser.push(response_bytes);
     let crossfeed_net::ParseStatus::Complete { message, .. } = status else {
         return None;

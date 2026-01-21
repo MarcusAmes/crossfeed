@@ -14,6 +14,7 @@ pub struct ProxyRuntimeConfig {
     pub listen_port: u16,
     pub body_limits: BodyLimits,
     pub protocol_mode: ProxyProtocolMode,
+    pub http1_max_header_bytes: usize,
 }
 
 impl ProxyRuntimeConfig {
@@ -34,6 +35,7 @@ impl ProxyRuntimeConfig {
             listen_port: context.config.proxy.listen_port,
             body_limits,
             protocol_mode: context.config.proxy.protocol_mode.clone(),
+            http1_max_header_bytes: context.config.proxy.http1_max_header_bytes as usize,
         }
     }
 }
@@ -53,6 +55,7 @@ pub async fn start_proxy(
     proxy_config.listen.port = config.listen_port;
     proxy_config.tls.ca_cert_dir = config.certs_dir.to_string_lossy().into_owned();
     proxy_config.tls.leaf_cert_dir = config.leaf_dir.to_string_lossy().into_owned();
+    proxy_config.http1_max_header_bytes = config.http1_max_header_bytes;
     proxy_config.protocol_mode = match config.protocol_mode {
         ProxyProtocolMode::Auto => crossfeed_proxy::ProxyProtocolMode::Auto,
         ProxyProtocolMode::Http1 => crossfeed_proxy::ProxyProtocolMode::Http1,

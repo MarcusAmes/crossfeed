@@ -186,16 +186,25 @@ fn find_headers_end(
     limits: Limits,
     _warnings: &mut Vec<ParseWarning>,
 ) -> Result<Option<usize>, ParseError> {
-    if buffer.len() > limits.max_header_bytes {
-        return Err(ParseError {
-            kind: ParseErrorKind::HeaderTooLarge,
-            offset: limits.max_header_bytes,
-        });
-    }
-
     match twoway::find_bytes(buffer, HEADER_TERMINATOR) {
-        Some(index) => Ok(Some(index)),
-        None => Ok(None),
+        Some(index) => {
+            if index > limits.max_header_bytes {
+                return Err(ParseError {
+                    kind: ParseErrorKind::HeaderTooLarge,
+                    offset: limits.max_header_bytes,
+                });
+            }
+            Ok(Some(index))
+        }
+        None => {
+            if buffer.len() > limits.max_header_bytes {
+                return Err(ParseError {
+                    kind: ParseErrorKind::HeaderTooLarge,
+                    offset: limits.max_header_bytes,
+                });
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -407,7 +416,7 @@ fn parse_body(
         return Ok((body, length));
     }
 
-    if headers_lower.contains("transfer-encoding: chunked") {
+    if has_chunked_transfer_encoding(headers_text) {
         return parse_chunked_body(buffer, body_start, limits);
     }
 
@@ -421,6 +430,25 @@ fn parse_content_length(headers: &str) -> Option<usize> {
         }
         None
     })
+}
+
+fn has_chunked_transfer_encoding(headers: &str) -> bool {
+    for line in headers.lines() {
+        let line = line.trim_end_matches('\r');
+        let mut parts = line.splitn(2, ':');
+        let name = parts.next().unwrap_or("").trim();
+        if !name.eq_ignore_ascii_case("transfer-encoding") {
+            continue;
+        }
+        let value = parts.next().unwrap_or("");
+        if value
+            .split(',')
+            .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn parse_chunked_body(

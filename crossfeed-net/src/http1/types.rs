@@ -49,7 +49,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_header_bytes: 64 * 1024,
+            max_header_bytes: 256 * 1024,
             max_body_bytes: 10 * 1024 * 1024,
         }
     }

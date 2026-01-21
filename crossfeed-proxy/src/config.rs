@@ -9,6 +9,7 @@ pub struct ProxyConfig {
     pub scope: ScopeConfig,
     pub body_limits: BodyLimits,
     pub protocol_mode: ProxyProtocolMode,
+    pub http1_max_header_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,6 +121,7 @@ impl Default for ProxyConfig {
             scope: ScopeConfig { rules: Vec::new() },
             body_limits: BodyLimits::default(),
             protocol_mode: ProxyProtocolMode::Auto,
+            http1_max_header_bytes: 256 * 1024,
         }
     }
 }
