@@ -37,12 +37,9 @@ impl HpackDecoder {
                     .map(|(name, value)| HeaderField { name, value })
                     .collect()
             })
-            .map_err(|err| {
-                println!("ERROR: H2 HPACK decode error detail={:?}", err);
-                Http2Error {
-                    kind: Http2ErrorKind::HpackDecode,
-                    offset: 0,
-                }
+            .map_err(|_err| Http2Error {
+                kind: Http2ErrorKind::HpackDecode,
+                offset: 0,
             })
     }
 }
@@ -50,10 +47,7 @@ impl HpackDecoder {
 fn run_hpack_self_test() {
     HPACK_SELF_TEST.get_or_init(|| {
         let mut decoder = Decoder::new();
-        match decoder.decode(b"\x82") {
-            Ok(_) => println!("ERROR: H2 HPACK self-test ok"),
-            Err(_) => println!("ERROR: H2 HPACK self-test failed"),
-        }
+        let _ = decoder.decode(b"\x82");
     });
 }
 

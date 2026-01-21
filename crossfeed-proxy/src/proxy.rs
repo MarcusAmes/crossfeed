@@ -221,10 +221,6 @@ where
 {
     let mut client_parser = Http2Parser::new();
     let mut upstream_parser = Http2Parser::new_without_preface();
-    println!(
-        "ERROR: H2 parser created client={:p} upstream={:p}",
-        &client_parser, &upstream_parser
-    );
     let mut client_session = Http2Session::new();
     let mut upstream_session = Http2Session::new();
     let (mut client_read, mut client_write) = tokio::io::split(client);
@@ -233,7 +229,6 @@ where
     let mut streams: HashMap<u32, Http2StreamState> = HashMap::new();
 
     send_settings_frame(&mut client_write, &client_session.local_settings, false).await?;
-    println!("ERROR: H2 settings sent to client");
     send_preface_and_settings(&mut upstream_write, &upstream_session.local_settings).await?;
 
     if !buffer.is_empty() {
@@ -278,7 +273,6 @@ where
             client_read_result = client_read.read(&mut temp) => {
                 let n = client_read_result.map_err(|err| ProxyError::Runtime(err.to_string()))?;
                 if n == 0 {
-                    println!("ERROR: H2 parser loop exit");
                     return Ok(());
                 }
                 handle_http2_bytes(
@@ -300,7 +294,6 @@ where
             upstream_read_result = upstream_read.read(&mut upstream_temp) => {
                 let n = upstream_read_result.map_err(|err| ProxyError::Runtime(err.to_string()))?;
                 if n == 0 {
-                    println!("ERROR: H2 parser loop exit");
                     return Ok(());
                 }
                 handle_http2_bytes(
@@ -592,24 +585,14 @@ where
     match frame.payload {
         crossfeed_net::FramePayload::Settings(settings) => {
             if !settings.ack {
-                let direction_label = match direction {
-                    Direction::ClientToUpstream => "client",
-                    Direction::UpstreamToClient => "upstream",
-                };
-                println!(
-                    "ERROR: H2 settings recv dir={} count={}",
-                    direction_label,
-                    settings.settings.len()
-                );
                 recv_session.apply_peer_settings(&settings);
                 recv_session.peer_settings_received = true;
                 for (id, value) in &settings.settings {
                     if *id == 0x1 && matches!(direction, Direction::ClientToUpstream) {
-                        println!("ERROR: H2 settings header_table_size={}", value);
+                        let _ = value;
                     }
                 }
                 send_settings_frame(sender_write, &recv_session.local_settings, true).await?;
-                println!("ERROR: H2 settings ack sent dir={}", direction_label);
                 flush_pending_after_settings(
                     state,
                     direction,
@@ -624,16 +607,6 @@ where
             }
         }
         crossfeed_net::FramePayload::WindowUpdate(update) => {
-            let direction_label = match direction {
-                Direction::ClientToUpstream => "client",
-                Direction::UpstreamToClient => "upstream",
-            };
-            println!(
-                "ERROR: H2 window_update recv dir={} stream={} increment={}",
-                direction_label,
-                update.stream_id,
-                update.increment
-            );
             recv_session.apply_send_window_update(update.stream_id, update.increment);
             flush_pending_data(direction, recv_session, sender_write, streams).await?;
         }
@@ -672,7 +645,6 @@ where
             })?;
         }
         crossfeed_net::FramePayload::RstStream(rst) => {
-            println!("ERROR: H2 send RST_STREAM stream={}", stream_id);
             let frame = encode_raw_frame(
                 crossfeed_net::FrameType::RstStream,
                 0,
@@ -693,9 +665,6 @@ where
             match direction {
                 Direction::ClientToUpstream => {
                     let stream = streams.entry(stream_id).or_insert_with(Http2StreamState::new);
-                    if !recv_session.peer_settings_received {
-                        println!("ERROR: H2 headers before settings dir=client");
-                    }
                     stream.request_headers.extend(headers.headers.clone());
                     if stream.request_id.is_none() {
                         initialize_http2_request_state(
@@ -742,9 +711,6 @@ where
                 }
                 Direction::UpstreamToClient => {
                     let stream = streams.entry(stream_id).or_insert_with(Http2StreamState::new);
-                    if !recv_session.peer_settings_received {
-                        println!("ERROR: H2 headers before settings dir=upstream");
-                    }
                     if stream.response_headers.is_empty() {
                         initialize_http2_response_state(state, stream).await?;
                     }
@@ -1398,22 +1364,14 @@ async fn send_settings_frame<W: AsyncWrite + Unpin>(
     let payload = if ack { Vec::new() } else { build_settings_payload(settings) };
     let flags = if ack { 0x1 } else { 0x0 };
     let frame = encode_raw_frame(crossfeed_net::FrameType::Settings, flags, 0, &payload);
-    writer.write_all(&frame).await.map_err(|err| {
-        if ack {
-            println!("ERROR: H2 settings ack write failed: {}", err);
-        } else {
-            println!("ERROR: H2 settings write failed: {}", err);
-        }
-        ProxyError::Runtime(err.to_string())
-    })?;
-    writer.flush().await.map_err(|err| {
-        if ack {
-            println!("ERROR: H2 settings ack flush failed: {}", err);
-        } else {
-            println!("ERROR: H2 settings flush failed: {}", err);
-        }
-        ProxyError::Runtime(err.to_string())
-    })?;
+    writer
+        .write_all(&frame)
+        .await
+        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
+    writer
+        .flush()
+        .await
+        .map_err(|err| ProxyError::Runtime(err.to_string()))?;
     Ok(())
 }
 
@@ -1439,7 +1397,7 @@ async fn send_headers_logged<W: AsyncWrite + Unpin>(
     stream_id: u32,
     end_stream: bool,
     headers: &[crossfeed_net::HeaderField],
-    direction_label: &str,
+    _direction_label: &str,
 ) -> Result<(), ProxyError> {
     let frames = encode_headers_from_fields(
         stream_id,
@@ -1448,14 +1406,7 @@ async fn send_headers_logged<W: AsyncWrite + Unpin>(
         encoder,
         max_frame_size,
     );
-    println!(
-        "ERROR: H2 send headers dir={} stream={} end_stream={} frames={}",
-        direction_label,
-        stream_id,
-        end_stream,
-        frames.len()
-    );
-    write_frames(writer, &frames).await
+        write_frames(writer, &frames).await
 }
 
 async fn send_data<W: AsyncWrite + Unpin>(
@@ -1472,13 +1423,9 @@ async fn send_data<W: AsyncWrite + Unpin>(
 async fn send_window_updates<W: AsyncWrite + Unpin>(
     writer: &mut W,
     updates: &[WindowUpdate],
-    direction_label: &str,
+    _direction_label: &str,
 ) -> Result<(), ProxyError> {
     for update in updates {
-        println!(
-            "ERROR: H2 window_update sent dir={} stream={} increment={}",
-            direction_label, update.stream_id, update.increment
-        );
         let payload = (update.increment & 0x7FFF_FFFF).to_be_bytes();
         let frame = encode_raw_frame(
             crossfeed_net::FrameType::WindowUpdate,
@@ -1595,7 +1542,7 @@ async fn flush_pending_data_inner<W: AsyncWrite + Unpin>(
     stream_id: u32,
     buffer: &mut Vec<u8>,
     pending_end_stream: &mut bool,
-    direction_label: &str,
+    _direction_label: &str,
     end_stream_sent: &mut bool,
 ) -> Result<(), ProxyError> {
     if buffer.is_empty() && *pending_end_stream {
@@ -1604,14 +1551,7 @@ async fn flush_pending_data_inner<W: AsyncWrite + Unpin>(
             return Ok(());
         }
         send_data(writer, session.max_frame_size(), stream_id, true, &[]).await?;
-        let stream_window_value = *session.send_stream_window(stream_id);
-        println!(
-            "ERROR: H2 send data dir={} stream={} bytes=0 end_stream=true conn_window={} stream_window={}",
-            direction_label,
-            stream_id,
-            session.send_conn_window,
-            stream_window_value
-        );
+        let _stream_window_value = *session.send_stream_window(stream_id);
         *pending_end_stream = false;
         *end_stream_sent = true;
         return Ok(());
@@ -1638,16 +1578,7 @@ async fn flush_pending_data_inner<W: AsyncWrite + Unpin>(
         session.send_conn_window -= chunk_len as i32;
         let stream_window = session.send_stream_window(stream_id);
         *stream_window -= chunk_len as i32;
-        let stream_window_value = *stream_window;
-        println!(
-            "ERROR: H2 send data dir={} stream={} bytes={} end_stream={} conn_window={} stream_window={}",
-            direction_label,
-            stream_id,
-            chunk_len,
-            end_stream,
-            session.send_conn_window,
-            stream_window_value
-        );
+        let _stream_window_value = *stream_window;
         if end_stream {
             *pending_end_stream = false;
             *end_stream_sent = true;
@@ -2540,7 +2471,7 @@ where
         ));
     }
 
-    let mut fallback_to_http1 = false;
+    let mut _fallback_to_http1 = false;
     if protocol_mode == ProxyProtocolMode::Auto
         && upstream_protocol == NegotiatedProtocol::Http2
         && client_protocol == NegotiatedProtocol::Http1
@@ -2554,7 +2485,7 @@ where
         .await?;
         tls_upstream = fallback_upstream;
         upstream_protocol = NegotiatedProtocol::Http1;
-        fallback_to_http1 = true;
+        _fallback_to_http1 = true;
     }
 
     {
@@ -2562,14 +2493,6 @@ where
         cache.insert(cache_key.clone(), upstream_protocol);
     }
 
-    println!(
-        "DEBUG: ALPN host={} upstream={} client={} fallback={} mode={:?}",
-        cache_key,
-        protocol_name(upstream_protocol),
-        protocol_name(client_protocol),
-        fallback_to_http1,
-        protocol_mode
-    );
 
 
     let mut buffer = vec![0u8; 8192];
