@@ -12,13 +12,20 @@ use crossfeed_storage::{
 use iced::event;
 use iced::keyboard::{self, Key, Modifiers};
 use iced::widget::{
-    PaneGrid, button, column, container, pane_grid, row, scrollable, text, text_input,
+    PaneGrid, Space, button, column, container, pane_grid, row, scrollable, stack, text,
+    text_input, tooltip,
 };
-use iced::{Alignment, Element, Length, Subscription, Task, Theme};
+use iced::{Alignment, Background, Color, Element, Length, Subscription, Task, Theme};
 use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "Crossfeed";
 const CONFIG_FILENAME: &str = "gui.toml";
+const THEME_FILENAME: &str = "theme.toml";
+const MENU_HEIGHT: f32 = 36.0;
+const MENU_BUTTON_WIDTH: f32 = 96.0;
+const MENU_SPACING: f32 = 8.0;
+const MENU_PADDING_X: f32 = 8.0;
+const MENU_PADDING_Y: f32 = 6.0;
 
 fn main() -> iced::Result {
     iced::application(APP_NAME, AppState::update, AppState::view)
@@ -56,6 +63,8 @@ enum Message {
     TailTick,
     TailLoaded(Result<TailUpdate, String>),
     ProxyStarted(Result<(), String>),
+    ToggleMenu(MenuKind),
+    LoadedTheme(Result<ThemeConfig, String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +73,22 @@ enum FocusArea {
     Detail,
     Response,
     ProjectPicker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuKind {
+    File,
+    Edit,
+    View,
+    Help,
+}
+
+#[derive(Debug, Clone)]
+struct MenuItem {
+    label: &'static str,
+    message: Option<Message>,
+    enabled: bool,
+    tooltip: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +132,8 @@ struct AppState {
     config: GuiConfig,
     focus: FocusArea,
     proxy_state: ProxyRuntimeState,
+    active_menu: Option<MenuKind>,
+    theme: ThemePalette,
 }
 
 impl AppState {
@@ -169,15 +196,18 @@ impl AppState {
 impl AppState {
     fn new() -> (Self, Task<Message>) {
         let config_path = gui_config_path();
-        let task = Task::perform(load_gui_config(config_path.clone()), Message::LoadedConfig);
+        let config_task = Task::perform(load_gui_config(config_path.clone()), Message::LoadedConfig);
+        let theme_task = Task::perform(load_theme_config(theme_config_path()), Message::LoadedTheme);
         (
             Self {
                 screen: Screen::ProjectPicker(ProjectPickerState::default()),
                 config: GuiConfig::default(),
                 focus: FocusArea::ProjectPicker,
                 proxy_state: ProxyRuntimeState::default(),
+                active_menu: None,
+                theme: ThemePalette::from_config(ThemeConfig::default()),
             },
-            task,
+            Task::batch([config_task, theme_task]),
         )
     }
 
@@ -200,7 +230,14 @@ impl AppState {
                 }
                 Task::none()
             }
+            Message::LoadedTheme(result) => {
+                if let Ok(theme) = result {
+                    self.theme = ThemePalette::from_config(theme);
+                }
+                Task::none()
+            }
             Message::OpenProjectRequested | Message::CreateProjectRequested => {
+                self.active_menu = None;
                 let mut picker = ProjectPickerState::default();
                 picker.intent = match message {
                     Message::CreateProjectRequested => ProjectIntent::Create,
@@ -240,6 +277,7 @@ impl AppState {
             Message::CancelProject => Task::none(),
             Message::ProjectOpened(result) => match result {
                 Ok(mut timeline) => {
+                    self.active_menu = None;
                     self.focus = FocusArea::Timeline;
                     self.config.last_project = Some(timeline.project_root.clone());
                     if let Some(layout) = self.config.pane_layout.take() {
@@ -290,6 +328,7 @@ impl AppState {
                 Task::none()
             }
             Message::ShowProjectSettings => {
+                self.active_menu = None;
                 if let Screen::Timeline(state) = &self.screen {
                     self.screen = Screen::ProjectSettings(ProjectSettingsState::from(state));
                     self.focus = FocusArea::ProjectPicker;
@@ -297,6 +336,7 @@ impl AppState {
                 Task::none()
             }
             Message::CloseProjectSettings => {
+                self.active_menu = None;
                 if let Screen::ProjectSettings(settings) = &self.screen {
                     self.screen = Screen::Timeline(settings.timeline_state.clone());
                     self.focus = FocusArea::Timeline;
@@ -331,11 +371,34 @@ impl AppState {
                 };
                 Task::none()
             }
+            Message::ToggleMenu(menu) => {
+                if self.active_menu == Some(menu) {
+                    self.active_menu = None;
+                } else {
+                    self.active_menu = Some(menu);
+                }
+                Task::none()
+            }
             Message::KeyPressed(key, modifiers) => self.handle_key(key, modifiers),
         }
     }
 
     fn handle_key(&mut self, key: keyboard::Key, modifiers: Modifiers) -> Task<Message> {
+        if modifiers.alt() {
+            if let Key::Character(ch) = &key {
+                let menu = match ch.to_ascii_lowercase().as_str() {
+                    "f" => Some(MenuKind::File),
+                    "e" => Some(MenuKind::Edit),
+                    "v" => Some(MenuKind::View),
+                    "h" => Some(MenuKind::Help),
+                    _ => None,
+                };
+                if let Some(menu) = menu {
+                    self.active_menu = Some(menu);
+                    return Task::none();
+                }
+            }
+        }
         match key {
             Key::Named(keyboard::key::Named::ArrowDown) => {
                 if let Screen::Timeline(state) = &mut self.screen {
@@ -353,6 +416,10 @@ impl AppState {
                 }
             }
             Key::Named(keyboard::key::Named::Escape) => {
+                if self.active_menu.is_some() {
+                    self.active_menu = None;
+                    return Task::none();
+                }
                 if matches!(self.focus, FocusArea::Detail | FocusArea::Response) {
                     self.focus = FocusArea::Timeline;
                 }
@@ -393,10 +460,138 @@ impl AppState {
 
     fn view(&self) -> Element<'_, Message> {
         match &self.screen {
-            Screen::ProjectPicker(picker) => picker.view(),
-            Screen::Timeline(state) => state.view(self.focus, &self.proxy_state),
-            Screen::ProjectSettings(settings) => settings.view(),
+            Screen::ProjectPicker(picker) => picker.view(&self.theme),
+            Screen::Timeline(state) => self.wrap_with_menu(
+                state.view(self.focus, &self.theme),
+            ),
+            Screen::ProjectSettings(settings) => self.wrap_with_menu(settings.view(&self.theme)),
         }
+    }
+
+    fn wrap_with_menu<'a>(&'a self, content: Element<'a, Message>) -> Element<'a, Message> {
+        let base = container(column![self.menu_view(), content])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style({
+                let theme = self.theme;
+                move |_| background_style(theme)
+            });
+        if let Some(overlay) = self.menu_overlay() {
+            let base: Element<'a, Message> = base.into();
+            stack![base, overlay].into()
+        } else {
+            base.into()
+        }
+    }
+
+    fn menu_view<'a>(&'a self) -> Element<'a, Message> {
+        let address = format!(
+            "{}:{}",
+            self.proxy_state.listen_host, self.proxy_state.listen_port
+        );
+        let proxy_label = match &self.proxy_state.status {
+            ProxyStatus::Running => format!("Proxy: running on {address}"),
+            ProxyStatus::Starting => format!("Proxy: starting on {address}"),
+            ProxyStatus::Stopped => format!("Proxy: stopped ({address})"),
+            ProxyStatus::Error(_) => format!("Proxy: error ({address})"),
+        };
+        let proxy_text = match self.proxy_state.status {
+            ProxyStatus::Error(_) => text_danger(proxy_label, 12, self.theme),
+            _ => text_muted(proxy_label, 12, self.theme),
+        };
+        let menu_row = row![
+            row![
+                self.menu_button("File", MenuKind::File),
+                self.menu_button("Edit", MenuKind::Edit),
+                self.menu_button("View", MenuKind::View),
+                self.menu_button("Help", MenuKind::Help),
+            ]
+            .spacing(MENU_SPACING),
+            Space::new(Length::Fill, Length::Shrink),
+            container(proxy_text).align_x(Alignment::End)
+        ]
+        .spacing(MENU_SPACING)
+        .align_y(Alignment::Center);
+
+        container(menu_row)
+            .width(Length::Fill)
+            .height(Length::Fixed(MENU_HEIGHT))
+            .padding([MENU_PADDING_Y, MENU_PADDING_X])
+            .style({
+                let theme = self.theme;
+                move |_| menu_bar_style(theme)
+            })
+            .into()
+    }
+
+    fn menu_overlay<'a>(&'a self) -> Option<Element<'a, Message>> {
+        let menu = self.active_menu?;
+        let offset = menu_offset(menu);
+        let panel = match menu {
+            MenuKind::File => menu_panel(
+                vec![
+                    MenuItem {
+                        label: "Open Project...",
+                        message: Some(Message::OpenProjectRequested),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                    MenuItem {
+                        label: "New Project...",
+                        message: Some(Message::CreateProjectRequested),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                ],
+                &self.theme,
+            ),
+            MenuKind::Edit => {
+                let retry_enabled = matches!(self.proxy_state.status, ProxyStatus::Error(_));
+                let retry_tooltip = match &self.proxy_state.status {
+                    ProxyStatus::Error(err) => Some(format!("Proxy error: {err}")),
+                    ProxyStatus::Running => Some("Proxy is running".to_string()),
+                    ProxyStatus::Starting => Some("Proxy is starting".to_string()),
+                    ProxyStatus::Stopped => Some("Proxy is stopped".to_string()),
+                };
+                menu_panel(
+                    vec![
+                        MenuItem {
+                            label: "Retry Proxy",
+                            message: retry_enabled.then_some(Message::RetryProxyStart),
+                            enabled: retry_enabled,
+                            tooltip: retry_tooltip,
+                        },
+                        MenuItem {
+                            label: "Proxy Settings...",
+                            message: Some(Message::ShowProjectSettings),
+                            enabled: true,
+                            tooltip: None,
+                        },
+                    ],
+                    &self.theme,
+                )
+            }
+            MenuKind::View | MenuKind::Help => menu_panel_text("No actions yet", &self.theme),
+        };
+
+        let overlay = container(column![
+            Space::new(Length::Shrink, Length::Fixed(MENU_HEIGHT)),
+            row![
+                Space::new(Length::Fixed(offset), Length::Shrink),
+                panel
+            ]
+            .align_y(Alignment::Start)
+        ])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Start)
+        .align_y(Alignment::Start);
+
+        Some(overlay.into())
+    }
+
+    fn menu_button<'a>(&'a self, label: &'static str, menu: MenuKind) -> Element<'a, Message> {
+        menu_action_button(label, menu, self.active_menu == Some(menu), self.theme).into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -412,7 +607,7 @@ impl AppState {
     }
 
     fn theme(&self) -> Theme {
-        Theme::TokyoNight
+        Theme::Light
     }
 }
 
@@ -449,7 +644,7 @@ impl Default for ProjectPickerState {
 }
 
 impl ProjectPickerState {
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self, theme: &ThemePalette) -> Element<'_, Message> {
         let title = match self.intent {
             ProjectIntent::Open => "Open Crossfeed Project",
             ProjectIntent::Create => "Create Crossfeed Project",
@@ -459,20 +654,24 @@ impl ProjectPickerState {
             ProjectIntent::Create => "Create project",
         };
         let mut content = column![
-            text(title).size(28),
-            text("Enter the project directory path.").size(14),
+            text_primary(title, 28, *theme),
+            text_muted("Enter the project directory path.", 14, *theme),
             text_input("/path/to/project", &self.pending_path)
                 .on_input(Message::ProjectPathChanged)
                 .padding(10)
-                .size(16),
+                .size(16)
+                .style({
+                    let theme = *theme;
+                    move |_theme, status| text_input_style(theme, status)
+                }),
             row![
-                button(action_label).on_press(Message::ConfirmProject),
-                button("Cancel").on_press(Message::CancelProject),
+                action_button(action_label, Message::ConfirmProject, *theme),
+                action_button("Cancel", Message::CancelProject, *theme),
             ]
             .spacing(12),
             row![
-                button("Open existing").on_press(Message::OpenProjectRequested),
-                button("Create new").on_press(Message::CreateProjectRequested),
+                action_button("Open existing", Message::OpenProjectRequested, *theme),
+                action_button("Create new", Message::CreateProjectRequested, *theme),
             ]
             .spacing(12),
         ]
@@ -480,18 +679,17 @@ impl ProjectPickerState {
         .align_x(Alignment::Start);
 
         if let Some(error) = &self.error {
-            content = content.push(text(error).style(|theme: &Theme| {
-                let palette = theme.extended_palette();
-                iced::widget::text::Style {
-                    color: Some(palette.danger.strong.color),
-                }
-            }));
+            content = content.push(text_danger(error, 14, *theme));
         }
 
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(40)
+            .style({
+                let theme = *theme;
+                move |_| background_style(theme)
+            })
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into()
@@ -509,20 +707,28 @@ impl ProjectSettingsState {
         }
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self, theme: &ThemePalette) -> Element<'_, Message> {
         let content = column![
-            text("Project Settings").size(28),
-            text("Proxy host").size(14),
+            text_primary("Project Settings", 28, *theme),
+            text_muted("Proxy host", 14, *theme),
             text_input("127.0.0.1", &self.proxy_host)
                 .on_input(Message::UpdateProxyHost)
-                .padding(8),
-            text("Proxy port").size(14),
+                .padding(8)
+                .style({
+                    let theme = *theme;
+                    move |_theme, status| text_input_style(theme, status)
+                }),
+            text_muted("Proxy port", 14, *theme),
             text_input("8888", &self.proxy_port)
                 .on_input(Message::UpdateProxyPort)
-                .padding(8),
+                .padding(8)
+                .style({
+                    let theme = *theme;
+                    move |_theme, status| text_input_style(theme, status)
+                }),
             row![
-                button("Save").on_press(Message::SaveProjectSettings),
-                button("Close").on_press(Message::CloseProjectSettings),
+                action_button("Save", Message::SaveProjectSettings, *theme),
+                action_button("Close", Message::CloseProjectSettings, *theme),
             ]
             .spacing(12),
         ]
@@ -533,6 +739,10 @@ impl ProjectSettingsState {
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(40)
+            .style({
+                let theme = *theme;
+                move |_| background_style(theme)
+            })
             .into()
     }
 }
@@ -592,16 +802,36 @@ impl TimelineState {
         })
     }
 
-    fn view(&self, focus: FocusArea, proxy_state: &ProxyRuntimeState) -> Element<'_, Message> {
+    fn view(
+        &self,
+        focus: FocusArea,
+        theme: &ThemePalette,
+    ) -> Element<'_, Message> {
         let grid = PaneGrid::new(&self.panes, |_, state, _| {
-            let content: Element<'_, Message> = match state {
-                PaneKind::Timeline => self.timeline_view(focus, proxy_state),
-                PaneKind::Detail => self.detail_view(focus),
-                PaneKind::Response => self.response_view(focus),
+            let pane_content: Element<'_, Message> = match state {
+                PaneKind::Timeline => self.timeline_view(focus, *theme),
+                PaneKind::Detail => self.detail_view(focus, *theme),
+                PaneKind::Response => self.response_view(focus, *theme),
             };
+            let content = container(pane_content).style({
+                let theme = *theme;
+                move |_| pane_border_style(theme)
+            });
             let title = state.title();
-            pane_grid::Content::new(content)
-                .title_bar(pane_grid::TitleBar::new(text(title)).padding(6))
+            let title_text = text(title).size(13).style({
+                let theme = *theme;
+                move |_theme: &Theme| iced::widget::text::Style {
+                    color: Some(theme.text),
+                }
+            });
+            pane_grid::Content::new(content).title_bar(
+                pane_grid::TitleBar::new(title_text)
+                    .padding(6)
+                    .style({
+                        let theme = *theme;
+                        move |_| menu_bar_style(theme)
+                    }),
+            )
         })
         .on_drag(Message::PaneDragged)
         .on_resize(10, Message::PaneResized);
@@ -612,47 +842,15 @@ impl TimelineState {
             .into()
     }
 
-    fn timeline_view(
-        &self,
-        _focus: FocusArea,
-        proxy_state: &ProxyRuntimeState,
-    ) -> Element<'_, Message> {
-        let proxy_status = match &proxy_state.status {
-            ProxyStatus::Stopped => "Proxy stopped".to_string(),
-            ProxyStatus::Starting => "Proxy starting...".to_string(),
-            ProxyStatus::Running => format!(
-                "Proxy running on {}:{}",
-                proxy_state.listen_host, proxy_state.listen_port
-            ),
-            ProxyStatus::Error(err) => format!("Proxy error: {err}"),
-        };
-        let mut header = column![
-            text("Timeline").size(20),
-            text(format!("Project: {}", self.project_root.display())).size(12),
-            text(proxy_status).size(12),
-        ]
-        .spacing(6);
-
-        if matches!(proxy_state.status, ProxyStatus::Error(_)) {
-            header = header.push(
-                row![
-                    button("Retry proxy").on_press(Message::RetryProxyStart),
-                    button("Settings").on_press(Message::ShowProjectSettings),
-                ]
-                .spacing(12),
-            );
-        } else {
-            header = header.push(button("Settings").on_press(Message::ShowProjectSettings));
-        }
-
-        let mut content = column![header].spacing(12);
+    fn timeline_view(&self, _focus: FocusArea, theme: ThemePalette) -> Element<'_, Message> {
+        let mut content = column![].spacing(12);
 
         for (index, item) in self.timeline.iter().enumerate() {
             let is_selected = self.selected == Some(index);
             let tags = self.tags.get(&item.id).cloned().unwrap_or_default();
             let response = self.responses.get(&item.id);
             let status = response.map(|resp| resp.status_code);
-            let row = timeline_row(item, status, &tags, is_selected)
+            let row = timeline_row(item, status, &tags, is_selected, theme)
                 .on_press(Message::TimelineSelected(index));
             content = content.push(row);
         }
@@ -660,7 +858,7 @@ impl TimelineState {
         scrollable(content).into()
     }
 
-    fn detail_view(&self, _focus: FocusArea) -> Element<'_, Message> {
+    fn detail_view(&self, _focus: FocusArea, theme: ThemePalette) -> Element<'_, Message> {
         let content = if let Some(selected) = self.selected.and_then(|idx| self.timeline.get(idx)) {
             let response = self.responses.get(&selected.id);
             let status_text = response
@@ -687,27 +885,27 @@ impl TimelineState {
                 format_bytes(selected.request_body_size, selected.request_body_truncated);
 
             column![
-                detail_line("URL", selected.url.clone()),
-                detail_line("Method", selected.method.clone()),
-                detail_line("Status", status_text),
-                detail_line("HTTP", selected.http_version.clone()),
-                detail_line("Started", selected.started_at.clone()),
-                detail_line("Completed", completed),
-                detail_line("Duration", duration_text),
-                detail_line("Source", selected.source.clone()),
-                detail_line("Scope", selected.scope_status_at_capture.clone()),
-                detail_line("Scope current", scope_current),
-                detail_line("Request size", request_size),
-                detail_line("Response size", response_size),
+                detail_line("URL", selected.url.clone(), theme),
+                detail_line("Method", selected.method.clone(), theme),
+                detail_line("Status", status_text, theme),
+                detail_line("HTTP", selected.http_version.clone(), theme),
+                detail_line("Started", selected.started_at.clone(), theme),
+                detail_line("Completed", completed, theme),
+                detail_line("Duration", duration_text, theme),
+                detail_line("Source", selected.source.clone(), theme),
+                detail_line("Scope", selected.scope_status_at_capture.clone(), theme),
+                detail_line("Scope current", scope_current, theme),
+                detail_line("Request size", request_size, theme),
+                detail_line("Response size", response_size, theme),
             ]
         } else {
-            column![text("Select a request to view details").size(16)]
+            column![text_muted("Select a request to view details", 16, theme)]
         };
 
         scrollable(container(content).padding(12)).into()
     }
 
-    fn response_view(&self, _focus: FocusArea) -> Element<'_, Message> {
+    fn response_view(&self, _focus: FocusArea, theme: ThemePalette) -> Element<'_, Message> {
         let content = if let Some(selected) = self.selected.and_then(|idx| self.timeline.get(idx)) {
             let response = self.responses.get(&selected.id);
 
@@ -741,17 +939,17 @@ impl TimelineState {
                     "Body"
                 };
                 column![
-                    detail_line("Status", status_line),
-                    text("Headers").size(14),
-                    container(text(headers)).padding(10),
-                    text(body_label).size(14),
-                    container(text(body_text)).padding(10),
+                    detail_line("Status", status_line, theme),
+                    text_muted("Headers", 14, theme),
+                    container(text_primary(headers, 12, theme)).padding(10),
+                    text_muted(body_label, 14, theme),
+                    container(text_primary(body_text, 12, theme)).padding(10),
                 ]
             } else {
-                column![text("No response recorded yet").size(16)]
+                column![text_muted("No response recorded yet", 16, theme)]
             }
         } else {
-            column![text("Select a request to preview response").size(16)]
+            column![text_muted("Select a request to preview response", 16, theme)]
         };
 
         scrollable(container(content).padding(12)).into()
@@ -926,6 +1124,76 @@ enum LayoutAxis {
     Vertical,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ThemeConfig {
+    background: String,
+    surface: String,
+    header: String,
+    text: String,
+    muted_text: String,
+    border: String,
+    accent: String,
+    danger: String,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            background: "#282828".to_string(),
+            surface: "#3c3836".to_string(),
+            header: "#504945".to_string(),
+            text: "#ebdbb2".to_string(),
+            muted_text: "#bdae93".to_string(),
+            border: "#665c54".to_string(),
+            accent: "#d79921".to_string(),
+            danger: "#cc241d".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ThemePalette {
+    background: Color,
+    surface: Color,
+    header: Color,
+    text: Color,
+    muted_text: Color,
+    border: Color,
+    accent: Color,
+    danger: Color,
+}
+
+impl ThemePalette {
+    fn from_config(config: ThemeConfig) -> Self {
+        let fallback = ThemePalette::default();
+        Self {
+            background: parse_hex_color(&config.background, fallback.background),
+            surface: parse_hex_color(&config.surface, fallback.surface),
+            header: parse_hex_color(&config.header, fallback.header),
+            text: parse_hex_color(&config.text, fallback.text),
+            muted_text: parse_hex_color(&config.muted_text, fallback.muted_text),
+            border: parse_hex_color(&config.border, fallback.border),
+            accent: parse_hex_color(&config.accent, fallback.accent),
+            danger: parse_hex_color(&config.danger, fallback.danger),
+        }
+    }
+}
+
+impl Default for ThemePalette {
+    fn default() -> Self {
+        Self {
+            background: Color::from_rgb8(0x28, 0x28, 0x28),
+            surface: Color::from_rgb8(0x3c, 0x38, 0x36),
+            header: Color::from_rgb8(0x50, 0x49, 0x45),
+            text: Color::from_rgb8(0xeb, 0xdb, 0xb2),
+            muted_text: Color::from_rgb8(0xbd, 0xae, 0x93),
+            border: Color::from_rgb8(0x66, 0x5c, 0x54),
+            accent: Color::from_rgb8(0xd7, 0x99, 0x21),
+            danger: Color::from_rgb8(0xcc, 0x24, 0x1d),
+        }
+    }
+}
+
 impl LayoutAxis {
     fn from(axis: pane_grid::Axis) -> Self {
         match axis {
@@ -947,6 +1215,11 @@ fn gui_config_path() -> PathBuf {
     base.join("crossfeed").join(CONFIG_FILENAME)
 }
 
+fn theme_config_path() -> PathBuf {
+    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    base.join("crossfeed").join(THEME_FILENAME)
+}
+
 async fn load_gui_config(path: PathBuf) -> Result<GuiConfig, String> {
     if !path.exists() {
         return Ok(GuiConfig::default());
@@ -963,6 +1236,20 @@ async fn save_gui_config(path: PathBuf, config: GuiConfig) -> Result<(), String>
     std::fs::write(path, raw).map_err(|err| err.to_string())
 }
 
+async fn load_theme_config(path: PathBuf) -> Result<ThemeConfig, String> {
+    if !path.exists() {
+        let default_theme = ThemeConfig::default();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        let raw = toml::to_string_pretty(&default_theme).map_err(|err| err.to_string())?;
+        std::fs::write(path, raw).map_err(|err| err.to_string())?;
+        return Ok(default_theme);
+    }
+    let contents = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+    toml::from_str(&contents).map_err(|err| err.to_string())
+}
+
 async fn open_project(path: PathBuf, intent: ProjectIntent) -> Result<TimelineState, String> {
     if intent == ProjectIntent::Open && !path.exists() {
         return Err("Project directory does not exist".to_string());
@@ -974,6 +1261,131 @@ async fn open_project(path: PathBuf, intent: ProjectIntent) -> Result<TimelineSt
 fn global_certs_dir() -> Result<PathBuf, String> {
     let base = dirs::config_dir().ok_or("Missing config directory")?;
     Ok(base.join("crossfeed").join("certs"))
+}
+
+fn menu_offset(menu: MenuKind) -> f32 {
+    let index = match menu {
+        MenuKind::File => 0.0,
+        MenuKind::Edit => 1.0,
+        MenuKind::View => 2.0,
+        MenuKind::Help => 3.0,
+    };
+    MENU_PADDING_X + index * (MENU_BUTTON_WIDTH + MENU_SPACING)
+}
+
+fn parse_hex_color(value: &str, fallback: Color) -> Color {
+    let value = value.trim().trim_start_matches('#');
+    if value.len() != 6 && value.len() != 8 {
+        return fallback;
+    }
+    let parse_pair = |slice: &str| u8::from_str_radix(slice, 16).ok();
+    let r = parse_pair(&value[0..2]);
+    let g = parse_pair(&value[2..4]);
+    let b = parse_pair(&value[4..6]);
+    match (r, g, b) {
+        (Some(r), Some(g), Some(b)) => {
+            if value.len() == 8 {
+                let a = parse_pair(&value[6..8]).unwrap_or(255);
+                Color::from_rgba8(r, g, b, f32::from(a) / 255.0)
+            } else {
+                Color::from_rgb8(r, g, b)
+            }
+        }
+        _ => fallback,
+    }
+}
+
+fn menu_bar_style(theme: ThemePalette) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        text_color: None,
+        background: Some(Background::Color(theme.header)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+fn menu_button_style(
+    theme: ThemePalette,
+    status: iced::widget::button::Status,
+    active: bool,
+) -> iced::widget::button::Style {
+    let base = if active { theme.header } else { theme.surface };
+    let background = match status {
+        iced::widget::button::Status::Hovered => theme.header,
+        iced::widget::button::Status::Pressed => theme.accent,
+        _ => base,
+    };
+    iced::widget::button::Style {
+        text_color: theme.text,
+        background: Some(Background::Color(background)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+fn menu_panel_style(theme: ThemePalette) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        text_color: Some(theme.text),
+        background: Some(Background::Color(theme.surface)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: theme.border,
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 8.0,
+        },
+    }
+}
+
+fn menu_item_button_style(
+    theme: ThemePalette,
+    status: iced::widget::button::Status,
+    enabled: bool,
+) -> iced::widget::button::Style {
+    let background = if !enabled {
+        theme.surface
+    } else {
+        match status {
+            iced::widget::button::Status::Hovered => theme.header,
+            iced::widget::button::Status::Pressed => theme.accent,
+            _ => theme.surface,
+        }
+    };
+    let text_color = if enabled { theme.text } else { theme.muted_text };
+    iced::widget::button::Style {
+        text_color,
+        background: Some(Background::Color(background)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+fn pane_border_style(theme: ThemePalette) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        text_color: None,
+        background: Some(Background::Color(theme.surface)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
 }
 
 fn start_proxy_runtime(
@@ -1006,6 +1418,7 @@ fn timeline_row(
     status: Option<u16>,
     tags: &[String],
     selected: bool,
+    theme: ThemePalette,
 ) -> iced::widget::Button<'static, Message> {
     let status_text = status
         .map(|code| code.to_string())
@@ -1034,14 +1447,14 @@ fn timeline_row(
 
     let row = column![
         row![
-            badge(item.method.clone()),
-            badge(status_text.clone()),
-            text(info).size(14),
+            badge(item.method.clone(), theme),
+            badge(status_text.clone(), theme),
+            text_primary(info, 14, theme),
         ]
         .spacing(8),
         row![
-            text(format!("{} • {}", duration, body_size)).size(12),
-            text(tag_label).size(12),
+            text_muted(format!("{} • {}", duration, body_size), 12, theme),
+            text_muted(tag_label, 12, theme),
         ]
         .spacing(8),
     ]
@@ -1050,39 +1463,23 @@ fn timeline_row(
     button(row)
         .padding(10)
         .width(Length::Fill)
-        .style(move |theme: &Theme, status| {
-            let palette = theme.extended_palette();
-            let base = if selected {
-                iced::widget::button::primary(theme, status)
-            } else {
-                iced::widget::button::secondary(theme, status)
-            };
-            base.with_background(palette.background.weak.color)
-        })
+        .style(move |_theme, status| timeline_row_style(theme, status, selected))
 }
 
-fn badge(label: String) -> Element<'static, Message> {
-    container(text(label).size(12))
+fn badge(label: String, theme: ThemePalette) -> Element<'static, Message> {
+    container(text_primary(label, 12, theme))
         .padding(6)
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            iced::widget::container::Style {
-                text_color: Some(palette.primary.base.text),
-                background: Some(palette.primary.weak.color.into()),
-                border: iced::border::Border {
-                    color: palette.primary.strong.color,
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                shadow: iced::Shadow::default(),
-            }
-        })
+        .style(move |_| badge_style(theme))
         .into()
 }
 
-fn detail_line(label: &'static str, value: impl Into<String>) -> Element<'static, Message> {
+fn detail_line(
+    label: &'static str,
+    value: impl Into<String>,
+    theme: ThemePalette,
+) -> Element<'static, Message> {
     let value = value.into();
-    row![text(label).size(12), text(value).size(14)]
+    row![text_muted(label, 12, theme), text_primary(value, 14, theme)]
         .spacing(8)
         .into()
 }
@@ -1175,4 +1572,205 @@ fn hex_dump(bytes: &[u8]) -> String {
         }
     }
     output
+}
+
+fn menu_panel(items: Vec<MenuItem>, theme: &ThemePalette) -> Element<'static, Message> {
+    let mut content = iced::widget::Column::new().spacing(6);
+    for item in items {
+        let theme = *theme;
+        let label_color = if item.enabled {
+            theme.text
+        } else {
+            theme.muted_text
+        };
+        let label = text(item.label).size(12).color(label_color);
+        let mut button = button(label)
+            .padding([4, 10])
+            .width(Length::Fill)
+            .style(move |_theme, status| menu_item_button_style(theme, status, item.enabled));
+        if let Some(message) = item.message.clone() {
+            button = button.on_press(message);
+        }
+        let element: Element<'static, Message> = if let Some(tooltip_text) = item.tooltip.clone() {
+            let tooltip_label = container(text(tooltip_text).size(12).color(theme.text))
+                .padding(6)
+                .style({
+                    let theme = theme;
+                    move |_| menu_panel_style(theme)
+                });
+            tooltip(button, tooltip_label, iced::widget::tooltip::Position::Bottom).into()
+        } else {
+            button.into()
+        };
+        content = content.push(element);
+    }
+    container(content)
+        .padding(8)
+        .width(Length::Fixed(200.0))
+        .style({
+            let theme = *theme;
+            move |_| menu_panel_style(theme)
+        })
+        .into()
+}
+
+fn menu_panel_text(text_value: &'static str, theme: &ThemePalette) -> Element<'static, Message> {
+    let label = text(text_value).size(12).style({
+        let theme = *theme;
+        move |_theme: &Theme| iced::widget::text::Style {
+            color: Some(theme.muted_text),
+        }
+    });
+    container(label)
+        .padding(8)
+        .width(Length::Fixed(200.0))
+        .style({
+            let theme = *theme;
+            move |_| menu_panel_style(theme)
+        })
+        .into()
+}
+
+fn text_primary(value: impl Into<String>, size: u16, theme: ThemePalette) -> iced::widget::Text<'static> {
+    text(value.into()).size(size).style(move |_theme: &Theme| {
+        iced::widget::text::Style {
+            color: Some(theme.text),
+        }
+    })
+}
+
+fn text_muted(value: impl Into<String>, size: u16, theme: ThemePalette) -> iced::widget::Text<'static> {
+    text(value.into()).size(size).style(move |_theme: &Theme| {
+        iced::widget::text::Style {
+            color: Some(theme.muted_text),
+        }
+    })
+}
+
+fn text_danger(value: impl Into<String>, size: u16, theme: ThemePalette) -> iced::widget::Text<'static> {
+    text(value.into()).size(size).style(move |_theme: &Theme| {
+        iced::widget::text::Style {
+            color: Some(theme.danger),
+        }
+    })
+}
+
+fn action_button(
+    label: &str,
+    message: Message,
+    theme: ThemePalette,
+) -> iced::widget::Button<'static, Message> {
+    button(text_primary(label, 12, theme))
+        .on_press(message)
+        .style(move |_theme, status| action_button_style(theme, status))
+}
+
+fn menu_action_button(
+    label: &'static str,
+    menu: MenuKind,
+    active: bool,
+    theme: ThemePalette,
+) -> iced::widget::Button<'static, Message> {
+    let label = container(text(label).size(14).color(theme.text))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
+    button(label)
+        .on_press(Message::ToggleMenu(menu))
+        .width(Length::Fixed(MENU_BUTTON_WIDTH))
+        .height(Length::Fixed(MENU_HEIGHT - 2.0 * MENU_PADDING_Y))
+        .padding(0)
+        .style(move |_theme, status| menu_button_style(theme, status, active))
+}
+
+fn text_input_style(theme: ThemePalette, status: iced::widget::text_input::Status) -> iced::widget::text_input::Style {
+    let border_color = match status {
+        iced::widget::text_input::Status::Focused => theme.accent,
+        iced::widget::text_input::Status::Hovered => theme.border,
+        iced::widget::text_input::Status::Disabled => theme.border,
+        iced::widget::text_input::Status::Active => theme.border,
+    };
+    iced::widget::text_input::Style {
+        background: Background::Color(theme.surface),
+        border: iced::border::Border {
+            color: border_color,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        icon: theme.muted_text,
+        placeholder: theme.muted_text,
+        value: theme.text,
+        selection: theme.accent,
+    }
+}
+
+fn background_style(theme: ThemePalette) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        text_color: None,
+        background: Some(Background::Color(theme.background)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 0.0,
+            radius: 0.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+fn action_button_style(
+    theme: ThemePalette,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let background = match status {
+        iced::widget::button::Status::Hovered => theme.header,
+        iced::widget::button::Status::Pressed => theme.accent,
+        _ => theme.surface,
+    };
+    iced::widget::button::Style {
+        text_color: theme.text,
+        background: Some(Background::Color(background)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+fn timeline_row_style(
+    theme: ThemePalette,
+    status: iced::widget::button::Status,
+    selected: bool,
+) -> iced::widget::button::Style {
+    let base = if selected { theme.header } else { theme.surface };
+    let background = match status {
+        iced::widget::button::Status::Hovered => theme.header,
+        iced::widget::button::Status::Pressed => theme.accent,
+        _ => base,
+    };
+    iced::widget::button::Style {
+        text_color: theme.text,
+        background: Some(Background::Color(background)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+fn badge_style(theme: ThemePalette) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        text_color: Some(theme.text),
+        background: Some(Background::Color(theme.header)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
 }
