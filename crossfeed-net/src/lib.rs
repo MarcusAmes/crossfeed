@@ -5,7 +5,9 @@ mod tls;
 
 pub use http1::{
     Header, HttpVersion, Limits, ParseError, ParseErrorKind, ParseStatus, ParseWarning,
-    ParseWarningKind, Request, RequestLine, RequestParser, Response, ResponseParser, StatusLine,
+    ParseWarningKind, Request, RequestFrameInfo, RequestLine, RequestParser, RequestStreamEvent,
+    RequestStreamParser, Response, ResponseFrameInfo, ResponseParser, ResponseStreamEvent,
+    ResponseStreamParser, StatusLine,
 };
 
 pub use http2::{
