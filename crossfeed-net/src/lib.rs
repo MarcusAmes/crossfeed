@@ -12,7 +12,9 @@ pub use http2::{
     DataFrame, Frame, FrameHeader, FramePayload, FrameType, GoAwayFrame, HeaderField, HeadersFrame,
     HpackDecoder, HpackEncoder, Http2Error, Http2ErrorKind, Http2ParseStatus, Http2Parser,
     Http2Warning, Http2WarningKind, PingFrame, PriorityFrame, RstStreamFrame, SettingsFrame,
-    WindowUpdateFrame,
+    WindowUpdateFrame, DEFAULT_MAX_FRAME_SIZE, encode_data_frames, encode_frames,
+    encode_headers_from_block, encode_headers_from_fields, encode_raw_frame,
+    encode_rst_stream_frame,
 };
 
 pub use tls::{

@@ -9,9 +9,9 @@ mod scope;
 mod timeline_event;
 
 pub use config::{
-    ListenConfig, ProxyConfig, ScopeConfig, ScopePatternType, ScopeRule, ScopeRuleType,
-    ScopeTarget, SocksAuthConfig, SocksConfig, SocksVersion, TlsMitmConfig, UpstreamConfig,
-    UpstreamMode,
+    ListenConfig, ProxyConfig, ProxyProtocolMode, ScopeConfig, ScopePatternType, ScopeRule,
+    ScopeRuleType, ScopeTarget, SocksAuthConfig, SocksConfig, SocksVersion, TlsMitmConfig,
+    UpstreamConfig, UpstreamMode,
 };
 pub use error::ProxyError;
 pub use events::{ProxyCommand, ProxyControl, ProxyEvents, control_channel, event_channel};

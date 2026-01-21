@@ -123,4 +123,5 @@ pub enum Http2ErrorKind {
     InvalidFrameHeader,
     IncompleteFrame,
     HpackDecode,
+    PendingHeadersOverflow,
 }

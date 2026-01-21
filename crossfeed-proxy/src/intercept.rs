@@ -57,6 +57,10 @@ impl<Request: Clone, Response: Clone> InterceptManager<Request, Response> {
         self.request_intercept_enabled = enabled;
     }
 
+    pub fn is_request_intercept_enabled(&self) -> bool {
+        self.request_intercept_enabled
+    }
+
     pub fn set_response_intercept(&mut self, enabled: bool) {
         if !enabled && self.response_intercept_enabled {
             let pending = std::mem::take(&mut self.pending_responses);
@@ -65,6 +69,14 @@ impl<Request: Clone, Response: Clone> InterceptManager<Request, Response> {
             }
         }
         self.response_intercept_enabled = enabled;
+    }
+
+    pub fn is_response_intercept_enabled(&self) -> bool {
+        self.response_intercept_enabled
+    }
+
+    pub fn should_intercept_response_for_request(&self, request_id: Uuid) -> bool {
+        self.response_intercept_for.contains(&request_id)
     }
 
     pub fn intercept_response_for_request(&mut self, request_id: Uuid) {

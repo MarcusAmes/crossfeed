@@ -19,6 +19,21 @@ pub struct TimelineConfig {
 pub struct ProxyProjectConfig {
     pub listen_host: String,
     pub listen_port: u16,
+    pub protocol_mode: ProxyProtocolMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyProtocolMode {
+    Auto,
+    Http1,
+    Http2,
+}
+
+impl Default for ProxyProtocolMode {
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,6 +74,7 @@ impl Default for ProxyProjectConfig {
         Self {
             listen_host: "127.0.0.1".to_string(),
             listen_port: 8888,
+            protocol_mode: ProxyProtocolMode::Auto,
         }
     }
 }

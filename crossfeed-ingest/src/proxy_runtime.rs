@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crossfeed_net::load_or_generate_ca;
 use crossfeed_proxy::{Proxy, ProxyConfig, ProxyEvents};
-use crossfeed_storage::{BodyLimits, SqliteStore};
+use crossfeed_storage::{BodyLimits, ProxyProtocolMode, SqliteStore};
 
 use crate::{IngestHandle, ProjectContext};
 
@@ -13,6 +13,7 @@ pub struct ProxyRuntimeConfig {
     pub listen_host: String,
     pub listen_port: u16,
     pub body_limits: BodyLimits,
+    pub protocol_mode: ProxyProtocolMode,
 }
 
 impl ProxyRuntimeConfig {
@@ -32,6 +33,7 @@ impl ProxyRuntimeConfig {
             listen_host: context.config.proxy.listen_host.clone(),
             listen_port: context.config.proxy.listen_port,
             body_limits,
+            protocol_mode: context.config.proxy.protocol_mode.clone(),
         }
     }
 }
@@ -51,6 +53,11 @@ pub async fn start_proxy(
     proxy_config.listen.port = config.listen_port;
     proxy_config.tls.ca_cert_dir = config.certs_dir.to_string_lossy().into_owned();
     proxy_config.tls.leaf_cert_dir = config.leaf_dir.to_string_lossy().into_owned();
+    proxy_config.protocol_mode = match config.protocol_mode {
+        ProxyProtocolMode::Auto => crossfeed_proxy::ProxyProtocolMode::Auto,
+        ProxyProtocolMode::Http1 => crossfeed_proxy::ProxyProtocolMode::Http1,
+        ProxyProtocolMode::Http2 => crossfeed_proxy::ProxyProtocolMode::Http2,
+    };
 
     let _ = load_or_generate_ca(
         &proxy_config.tls.ca_cert_dir,

@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use super::hpack::HpackDecoder;
 use super::types::{
     DataFrame, Frame, FrameHeader, FramePayload, FrameType, GoAwayFrame, HeadersFrame, Http2Error,
@@ -30,6 +32,10 @@ pub struct Http2Parser {
     max_frame_size: usize,
     hpack: HpackDecoder,
     header_block: Option<HeaderBlockBuffer>,
+    settings_received: bool,
+    pending_headers: VecDeque<PendingHeaderBlock>,
+    max_pending_headers: usize,
+    decoded_headers_count: usize,
 }
 
 impl Default for Http2Parser {
@@ -41,24 +47,55 @@ impl Default for Http2Parser {
             max_frame_size: 16 * 1024,
             hpack: HpackDecoder::new(),
             header_block: None,
+            settings_received: false,
+            pending_headers: VecDeque::new(),
+            max_pending_headers: 8,
+            decoded_headers_count: 0,
         }
     }
 }
 
 impl Http2Parser {
     pub fn new() -> Self {
-        Self::default()
+        let mut parser = Self::default();
+        parser.hpack.set_max_table_size(65_536);
+        parser
+    }
+
+    pub fn new_without_preface() -> Self {
+        let mut parser = Self::default();
+        parser.hpack.set_max_table_size(65_536);
+        parser.preface_seen = true;
+        parser
     }
 
     pub fn with_max_frame_size(max_frame_size: usize) -> Self {
-        Self {
+        let mut parser = Self {
             buffer: Vec::new(),
             warnings: Vec::new(),
             preface_seen: false,
             max_frame_size,
             hpack: HpackDecoder::new(),
             header_block: None,
-        }
+            settings_received: false,
+            pending_headers: VecDeque::new(),
+            max_pending_headers: 8,
+            decoded_headers_count: 0,
+        };
+        parser.hpack.set_max_table_size(65_536);
+        parser
+    }
+
+    pub fn set_max_frame_size(&mut self, max_frame_size: usize) {
+        self.max_frame_size = max_frame_size;
+    }
+
+    pub fn set_max_header_table_size(&mut self, size: u32) {
+        self.hpack.set_max_table_size(size);
+    }
+
+    pub fn set_settings_received(&mut self, received: bool) {
+        self.settings_received = received;
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Http2ParseStatus {
@@ -83,6 +120,55 @@ impl Http2Parser {
             }
             self.buffer.drain(..PREFACE.len());
             self.preface_seen = true;
+        }
+
+        if self.settings_received {
+            if let Some(pending) = self.pending_headers.pop_front() {
+                match self.hpack.decode(&pending.header_block) {
+                    Ok(decoded) => {
+                        println!(
+                            "ERROR: H2 headers decode stream={} flags=0x{:02x} end_stream={} source=queued",
+                            pending.stream_id,
+                            pending.flags,
+                            pending.end_stream
+                        );
+                        self.decoded_headers_count += 1;
+                        if self.decoded_headers_count <= 5 {
+                            println!(
+                                "ERROR: H2 headers decoded count={} source=queued",
+                                self.decoded_headers_count
+                            );
+                        }
+                        let frame = Frame {
+                            header: FrameHeader {
+                                length: pending.header_block.len(),
+                                frame_type: FrameType::Headers,
+                                flags: pending.flags,
+                                stream_id: pending.stream_id,
+                            },
+                            payload: FramePayload::Headers(HeadersFrame {
+                                end_stream: pending.end_stream,
+                                end_headers: true,
+                                header_block: pending.header_block,
+                                headers: decoded,
+                            }),
+                        };
+                        let warnings = std::mem::take(&mut self.warnings);
+                        return Http2ParseStatus::Complete { frame, warnings };
+                    }
+                    Err(error) => {
+                        log_header_block_prefix("queued", &pending.header_block);
+                        println!(
+                            "ERROR: H2 HPACK decode state settings_received={} max_table={} block_len={} source=queued",
+                            self.settings_received,
+                            self.hpack.max_table_size(),
+                            pending.header_block.len()
+                        );
+                        let warnings = std::mem::take(&mut self.warnings);
+                        return Http2ParseStatus::Error { error, warnings };
+                    }
+                }
+            }
         }
 
         match parse_frame(&self.buffer, self.max_frame_size, &mut self.warnings) {
@@ -134,6 +220,31 @@ impl Http2Parser {
         };
 
         if headers.end_headers {
+            if !self.settings_received {
+                self.queue_pending_headers(block, header.flags)?;
+                return Ok(None);
+            }
+
+            println!(
+                "ERROR: H2 HPACK decode state settings_received={} max_table={} block_len={} source=headers",
+                self.settings_received,
+                self.hpack.max_table_size(),
+                block.fragments.len()
+            );
+            log_header_block_prefix("headers", &block.fragments);
+            println!(
+                "ERROR: H2 headers decode stream={} flags=0x{:02x} end_stream={} source=headers",
+                block.stream_id,
+                header.flags,
+                block.end_stream
+            );
+            self.decoded_headers_count += 1;
+            if self.decoded_headers_count <= 5 {
+                println!(
+                    "ERROR: H2 headers decoded count={} source=headers",
+                    self.decoded_headers_count
+                );
+            }
             let decoded = self.hpack.decode(&block.fragments)?;
             let frame = Frame {
                 header,
@@ -161,6 +272,7 @@ impl Http2Parser {
                 kind: Http2WarningKind::HeadersContinuationMismatch,
                 offset: 0,
             });
+            println!("ERROR: H2 continuation without pending headers");
             return Ok(Some(Frame {
                 header,
                 payload: FramePayload::Continuation(fragment),
@@ -182,6 +294,31 @@ impl Http2Parser {
             return Ok(None);
         }
 
+        if !self.settings_received {
+            self.queue_pending_headers(pending, header.flags)?;
+            return Ok(None);
+        }
+
+        println!(
+            "ERROR: H2 HPACK decode state settings_received={} max_table={} block_len={} source=continuation",
+            self.settings_received,
+            self.hpack.max_table_size(),
+            pending.fragments.len()
+        );
+        log_header_block_prefix("continuation", &pending.fragments);
+        println!(
+            "ERROR: H2 headers decode stream={} flags=0x{:02x} end_stream={} source=continuation",
+            pending.stream_id,
+            header.flags,
+            pending.end_stream
+        );
+        self.decoded_headers_count += 1;
+        if self.decoded_headers_count <= 5 {
+            println!(
+                "ERROR: H2 headers decoded count={} source=continuation",
+                self.decoded_headers_count
+            );
+        }
         let decoded = self.hpack.decode(&pending.fragments)?;
         let frame = Frame {
             header: FrameHeader {
@@ -200,6 +337,26 @@ impl Http2Parser {
 
         Ok(Some(frame))
     }
+
+    fn queue_pending_headers(
+        &mut self,
+        pending: HeaderBlockBuffer,
+        flags: u8,
+    ) -> Result<(), Http2Error> {
+        if self.pending_headers.len() >= self.max_pending_headers {
+            return Err(Http2Error {
+                kind: Http2ErrorKind::PendingHeadersOverflow,
+                offset: 0,
+            });
+        }
+        self.pending_headers.push_back(PendingHeaderBlock {
+            stream_id: pending.stream_id,
+            end_stream: pending.end_stream,
+            flags,
+            header_block: pending.fragments,
+        });
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -207,6 +364,14 @@ struct HeaderBlockBuffer {
     stream_id: u32,
     end_stream: bool,
     fragments: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct PendingHeaderBlock {
+    stream_id: u32,
+    end_stream: bool,
+    flags: u8,
+    header_block: Vec<u8>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -295,12 +460,28 @@ fn decode_payload(
             end_stream: flags & 0x1 != 0,
             payload: payload.to_vec(),
         })),
-        FrameType::Headers => Ok(FramePayload::Headers(HeadersFrame {
-            end_stream: flags & 0x1 != 0,
-            end_headers: flags & 0x4 != 0,
-            header_block: payload.to_vec(),
-            headers: Vec::new(),
-        })),
+        FrameType::Headers => {
+            println!(
+                "ERROR: H2 headers frame header len={} flags=0x{:02x} stream={}",
+                payload.len(),
+                flags,
+                stream_id
+            );
+            let header_block = extract_header_block(payload, flags)?;
+            if header_block.len() > payload.len() {
+                println!(
+                    "ERROR: H2 headers length mismatch declared={} actual={}",
+                    payload.len(),
+                    header_block.len()
+                );
+            }
+            Ok(FramePayload::Headers(HeadersFrame {
+                end_stream: flags & 0x1 != 0,
+                end_headers: flags & 0x4 != 0,
+                header_block,
+                headers: Vec::new(),
+            }))
+        }
         FrameType::Priority => {
             if payload.len() < 5 {
                 return Err(Http2Error {
@@ -405,6 +586,90 @@ fn decode_payload(
         FrameType::Continuation => Ok(FramePayload::Continuation(payload.to_vec())),
         FrameType::PushPromise | FrameType::Unknown(_) => Ok(FramePayload::Raw(payload.to_vec())),
     }
+}
+
+fn extract_header_block(payload: &[u8], flags: u8) -> Result<Vec<u8>, Http2Error> {
+    let mut offset = 0;
+    let mut pad_len = 0usize;
+
+    log_headers_payload_prefix(flags, payload);
+
+    if flags & 0x8 != 0 {
+        if payload.is_empty() {
+            return Err(Http2Error {
+                kind: Http2ErrorKind::IncompleteFrame,
+                offset: 0,
+            });
+        }
+        pad_len = payload[0] as usize;
+        offset = 1;
+    }
+
+    if flags & 0x20 != 0 {
+        if payload.len() < offset + 5 {
+            return Err(Http2Error {
+                kind: Http2ErrorKind::IncompleteFrame,
+                offset: 0,
+            });
+        }
+        offset += 5;
+    }
+
+    if payload.len() < offset + pad_len {
+        return Err(Http2Error {
+            kind: Http2ErrorKind::IncompleteFrame,
+            offset: 0,
+        });
+    }
+
+    let end = payload.len() - pad_len;
+    if end < offset {
+        return Err(Http2Error {
+            kind: Http2ErrorKind::IncompleteFrame,
+            offset: 0,
+        });
+    }
+
+    let header_block = payload[offset..end].to_vec();
+    println!(
+        "ERROR: H2 headers slice flags=0x{:02x} payload_len={} offset={} pad_len={} header_block_len={}",
+        flags,
+        payload.len(),
+        offset,
+        pad_len,
+        header_block.len()
+    );
+    Ok(header_block)
+}
+
+fn log_headers_payload_prefix(flags: u8, payload: &[u8]) {
+    let end = payload.len().min(12);
+    let mut bytes = String::new();
+    for (index, byte) in payload[..end].iter().enumerate() {
+        if index > 0 {
+            bytes.push(' ');
+        }
+        bytes.push_str(&format!("{:02x}", byte));
+    }
+    println!(
+        "ERROR: H2 headers payload prefix flags=0x{:02x} bytes={}",
+        flags, bytes
+    );
+}
+
+fn log_header_block_prefix(source: &str, header_block: &[u8]) {
+    let end = header_block.len().min(16);
+    let mut bytes = String::new();
+    for (index, byte) in header_block[..end].iter().enumerate() {
+        if index > 0 {
+            bytes.push(' ');
+        }
+        bytes.push_str(&format!("{:02x}", byte));
+    }
+    println!(
+        "ERROR: H2 HPACK header_block prefix source={} bytes={}",
+        source, bytes
+    );
 }
 
 #[cfg(test)]

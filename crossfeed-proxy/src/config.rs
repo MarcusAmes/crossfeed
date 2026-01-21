@@ -8,6 +8,15 @@ pub struct ProxyConfig {
     pub upstream: UpstreamConfig,
     pub scope: ScopeConfig,
     pub body_limits: BodyLimits,
+    pub protocol_mode: ProxyProtocolMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyProtocolMode {
+    Auto,
+    Http1,
+    Http2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,6 +119,7 @@ impl Default for ProxyConfig {
             },
             scope: ScopeConfig { rules: Vec::new() },
             body_limits: BodyLimits::default(),
+            protocol_mode: ProxyProtocolMode::Auto,
         }
     }
 }

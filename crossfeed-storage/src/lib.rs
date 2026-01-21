@@ -16,7 +16,7 @@ mod worker;
 
 pub use project::{
     BodyLimitsConfig, ProjectConfig, ProjectLayout, ProjectPaths, ProxyProjectConfig,
-    TimelineConfig,
+    ProxyProtocolMode, TimelineConfig,
 };
 pub use query::{TimelineQuery, TimelineSort};
 pub use replay::{ReplayExecution, ReplayRequest, ReplayVersion};
