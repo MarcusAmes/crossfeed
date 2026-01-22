@@ -9,6 +9,9 @@ pub use response_preview::{
 };
 
 use serde::{Deserialize, Serialize};
+use iced::widget::{container, scrollable, text};
+use iced::{Element, Length};
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneModuleKind {
@@ -29,6 +32,26 @@ impl PaneModuleKind {
             PaneModuleKind::ReplayEditor => "Replay Editor",
         }
     }
+}
+
+pub fn pane_root<'a, Message: 'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+pub fn pane_scroll<'a, Message: 'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+    container(scrollable(content))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+pub fn pane_text_editor<'a, Message: 'a>(
+    editor: iced::widget::TextEditor<'a, impl text::Highlighter, Message, iced::Theme, iced::Renderer>,
+) -> Element<'a, Message> {
+    pane_root(container(editor).padding(12).width(Length::Fill).height(Length::Fill).into())
 }
 
 pub fn format_bytes(bytes: usize, truncated: bool) -> String {

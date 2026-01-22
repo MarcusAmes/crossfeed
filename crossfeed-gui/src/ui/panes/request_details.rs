@@ -1,11 +1,11 @@
 use crossfeed_ingest::TimelineItem;
 use crossfeed_storage::ResponseSummary;
-use iced::widget::{column, container, row, scrollable};
+use iced::widget::{column, container, row};
 use iced::Element;
 
 use crate::app::Message;
 use crate::theme::{ThemePalette, text_muted, text_primary};
-use crate::ui::panes::format_bytes;
+use crate::ui::panes::{format_bytes, pane_scroll};
 
 pub fn timeline_request_details_view(
     selected: Option<&TimelineItem>,
@@ -54,7 +54,7 @@ pub fn timeline_request_details_view(
         column![text_muted("Select a request to view details", 16, theme)]
     };
 
-    scrollable(container(content).padding(12)).into()
+    pane_scroll(container(content).padding(12).into())
 }
 
 fn detail_line(label: &'static str, value: impl Into<String>, theme: ThemePalette) -> Element<'static, Message> {

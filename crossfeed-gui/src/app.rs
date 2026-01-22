@@ -12,6 +12,7 @@ use iced::mouse;
 use iced::keyboard::{self, Key, Modifiers};
 use iced::widget::{
     PaneGrid, Space, column, container, mouse_area, pane_grid, row, stack, text, text_input,
+    text_editor,
 };
 use iced::{Alignment, Element, Length, Point, Subscription, Task, Theme};
 use serde::{Deserialize, Serialize};
@@ -77,7 +78,7 @@ pub enum Message {
     TailLoaded(Result<TailUpdate, String>),
     ProxyStarted(Result<(), String>),
     ReplaySelect(usize),
-    ReplayUpdateDetails(String),
+    ReplayUpdateDetails(text_editor::Action),
     ReplayPaneDragged(pane_grid::DragEvent),
     ReplayPaneResized(pane_grid::ResizeEvent),
     ToggleMenu(MenuKind),
@@ -152,7 +153,7 @@ pub enum ProxyStatus {
     Error(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AppState {
     pub screen: Screen,
     pub config: GuiConfig,
@@ -397,7 +398,7 @@ impl AppState {
                 Task::none()
             }
             Message::ReplayUpdateDetails(body) => {
-                self.replay_state.update_request_body(body);
+                self.replay_state.apply_editor_action(body);
                 Task::none()
             }
             Message::ReplayPaneDragged(event) => {
@@ -1437,7 +1438,10 @@ impl AppState {
 
         let grid = PaneGrid::new(state, |_, pane_kind, _| {
             let pane_content = self.render_custom_pane(*pane_kind, context, *theme);
-            let content = container(pane_content).style({
+            let content = container(pane_content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style({
                 let theme = *theme;
                 move |_| pane_border_style(theme)
             });

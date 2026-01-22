@@ -1,19 +1,22 @@
 use iced::widget::{
-    PaneGrid, button, column, container, pane_grid, scrollable, text, text_input,
+    PaneGrid, button, column, container, pane_grid, text, text_editor,
 };
 use iced::{Element, Length, Theme};
+use iced::widget::text_editor::Content;
 use serde::{Deserialize, Serialize};
 
 use crate::app::Message;
-use crate::theme::{ThemePalette, pane_border_style, text_input_style, text_muted, text_primary};
-use crate::ui::panes::{response_preview_from_bytes, response_preview_placeholder};
+use crate::theme::{ThemePalette, pane_border_style, text_editor_style, text_muted, text_primary};
+use crate::ui::panes::{
+    pane_scroll, pane_text_editor, response_preview_from_bytes, response_preview_placeholder,
+};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ReplayState {
     panes: pane_grid::State<ReplayPaneKind>,
     requests: Vec<String>,
     selected: Option<usize>,
-    request_body: String,
+    editor_content: Content,
 }
 
 impl Default for ReplayState {
@@ -26,7 +29,7 @@ impl Default for ReplayState {
                 "Checkout".to_string(),
             ],
             selected: Some(0),
-            request_body: "GET /api/example\nHost: example.com\n\n".to_string(),
+            editor_content: Content::with_text("GET /api/example\nHost: example.com\n\n"),
         };
         state.apply_layout(default_replay_layout());
         state
@@ -41,7 +44,10 @@ impl ReplayState {
                 ReplayPaneKind::Editor => self.request_editor_view(*theme),
                 ReplayPaneKind::Response => self.response_view(*theme),
             };
-            let content = container(pane_content).style({
+            let content = container(pane_content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style({
                 let theme = *theme;
                 move |_| pane_border_style(theme)
             });
@@ -85,24 +91,21 @@ impl ReplayState {
             list = list.push(row);
         }
 
-        scrollable(list).into()
+        pane_scroll(list.into())
     }
 
     pub(crate) fn request_editor_view(&self, theme: ThemePalette) -> Element<'_, Message> {
-        let editor = text_input("Request details", &self.request_body)
-            .on_input(Message::ReplayUpdateDetails)
-            .padding(8)
+        let editor = text_editor(&self.editor_content)
+            .on_action(Message::ReplayUpdateDetails)
+            .size(14)
+            .width(1600.0)
+            .height(Length::Fill)
             .style({
                 let theme = theme;
-                move |_theme, status| text_input_style(theme, status)
-            })
-            .size(14);
+                move |_theme, status| text_editor_style(theme, status)
+            });
 
-        let content = column![text_muted("Request editor", 12, theme), editor]
-            .spacing(6)
-            .height(Length::Fill);
-
-        container(content).height(Length::Fill).into()
+        pane_text_editor(editor)
     }
 
     fn response_view(&self, theme: ThemePalette) -> Element<'_, Message> {
@@ -123,15 +126,16 @@ impl ReplayState {
     pub fn select(&mut self, index: usize) {
         self.selected = Some(index);
         if let Some(label) = self.requests.get(index) {
-            self.request_body = format!(
+            let body = format!(
                 "GET /replay/{}\nHost: example.com\n\n",
                 label.to_lowercase().replace(' ', "-")
             );
+            self.editor_content = Content::with_text(&body);
         }
     }
 
-    pub fn update_request_body(&mut self, body: String) {
-        self.request_body = body;
+    pub fn apply_editor_action(&mut self, action: text_editor::Action) {
+        self.editor_content.perform(action);
     }
 
     pub fn snapshot_layout(&self) -> ReplayLayout {

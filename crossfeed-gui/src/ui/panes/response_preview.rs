@@ -4,6 +4,7 @@ use iced::Element;
 
 use crate::app::Message;
 use crate::theme::{ThemePalette, text_muted, text_primary};
+use crate::ui::panes::pane_scroll;
 
 pub fn response_preview_from_bytes(
     status_line: String,
@@ -27,7 +28,7 @@ pub fn response_preview_from_bytes(
         container(text_primary(body_text, 12, theme)).padding(10),
     ];
 
-    iced::widget::scrollable(container(content).padding(12)).into()
+    pane_scroll(container(content).padding(12).into())
 }
 
 pub fn response_preview_placeholder(
@@ -35,7 +36,7 @@ pub fn response_preview_placeholder(
     theme: ThemePalette,
 ) -> Element<'static, Message> {
     let content = column![text_muted(message, 16, theme)];
-    iced::widget::scrollable(container(content).padding(12)).into()
+    pane_scroll(container(content).padding(12).into())
 }
 
 fn detail_line(label: &'static str, value: impl Into<String>, theme: ThemePalette) -> Element<'static, Message> {

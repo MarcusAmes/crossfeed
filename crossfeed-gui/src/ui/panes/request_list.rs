@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use crossfeed_ingest::TimelineItem;
 use crossfeed_storage::ResponseSummary;
-use iced::widget::{button, column, container, row, scrollable};
+use iced::widget::{button, column, container, row};
 use iced::{Element, Length};
 
 use crate::app::Message;
 use crate::theme::{ThemePalette, badge_style, text_muted, text_primary, timeline_row_style};
-use crate::ui::panes::format_bytes;
+use crate::ui::panes::{format_bytes, pane_scroll};
 
 pub fn timeline_request_list_view(
     items: &[TimelineItem],
@@ -28,7 +28,7 @@ pub fn timeline_request_list_view(
         content = content.push(row);
     }
 
-    scrollable(content).into()
+    pane_scroll(content.into())
 }
 
 fn timeline_row(

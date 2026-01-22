@@ -360,6 +360,30 @@ pub fn text_input_style(
     }
 }
 
+pub fn text_editor_style(
+    theme: ThemePalette,
+    status: iced::widget::text_editor::Status,
+) -> iced::widget::text_editor::Style {
+    let border_color = match status {
+        iced::widget::text_editor::Status::Focused => theme.accent,
+        iced::widget::text_editor::Status::Hovered => theme.border,
+        iced::widget::text_editor::Status::Disabled => theme.border,
+        iced::widget::text_editor::Status::Active => theme.border,
+    };
+    iced::widget::text_editor::Style {
+        background: Background::Color(theme.surface),
+        border: iced::border::Border {
+            color: border_color,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        icon: theme.muted_text,
+        placeholder: theme.muted_text,
+        value: theme.text,
+        selection: theme.accent,
+    }
+}
+
 pub fn background_style(theme: ThemePalette) -> iced::widget::container::Style {
     iced::widget::container::Style {
         text_color: None,

@@ -72,7 +72,10 @@ impl TimelineState {
                 PaneKind::Detail => self.detail_view(focus, *theme),
                 PaneKind::Response => self.response_view(focus, *theme),
             };
-            let content = container(pane_content).style({
+            let content = container(pane_content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style({
                 let theme = *theme;
                 move |_| pane_border_style(theme)
             });
