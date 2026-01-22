@@ -20,6 +20,7 @@ use crate::menu::{
 };
 use crate::project_picker::ProjectPickerState;
 use crate::project_settings::ProjectSettingsState;
+use crate::replay::{ReplayLayout, ReplayState, default_replay_layout};
 use crate::theme::{
     ThemeConfig, ThemePalette, action_button, background_style, load_theme_config, menu_bar_style,
     menu_item_button_style, menu_panel_style, tab_button_style, text_danger, text_input_style,
@@ -69,6 +70,10 @@ pub enum Message {
     TailTick,
     TailLoaded(Result<TailUpdate, String>),
     ProxyStarted(Result<(), String>),
+    ReplaySelect(usize),
+    ReplayUpdateDetails(String),
+    ReplayPaneDragged(pane_grid::DragEvent),
+    ReplayPaneResized(pane_grid::ResizeEvent),
     ToggleMenu(MenuKind),
     LoadedTheme(Result<ThemeConfig, String>),
     OpenNewTabPrompt,
@@ -142,6 +147,7 @@ pub struct AppState {
     pub proxy_state: ProxyRuntimeState,
     pub active_menu: Option<MenuKind>,
     pub theme: ThemePalette,
+    pub replay_state: ReplayState,
     pub tab_prompt_label: String,
     pub tab_prompt_mode: Option<TabPromptMode>,
     pub tab_prompt_input_id: text_input::Id,
@@ -185,6 +191,7 @@ impl AppState {
             proxy_state: ProxyRuntimeState::default(),
             active_menu: None,
             theme: ThemePalette::from_config(ThemeConfig::default()),
+            replay_state: ReplayState::default(),
             tab_prompt_label: String::new(),
             tab_prompt_mode: None,
             tab_prompt_input_id: text_input::Id::unique(),
@@ -280,6 +287,7 @@ impl AppState {
                     );
                     self.proxy_state.status = ProxyStatus::Starting;
                     self.screen = Screen::Timeline(timeline);
+                    self.sync_active_tab_layout();
                     Task::batch([
                         Task::perform(
                             save_gui_config(gui_config_path(), self.config.clone()),
@@ -298,9 +306,7 @@ impl AppState {
             Message::PaneDragged(event) => {
                 if let Screen::Timeline(state) = &mut self.screen {
                     if let Some(snapshot) = state.handle_pane_drag(event) {
-                        if let Some(tab) = self.timeline_tab_mut() {
-                            tab.layout = Some(snapshot);
-                        }
+                        self.set_active_tab_layout(TabLayout::Timeline(snapshot));
                     }
                 }
                 Task::none()
@@ -308,9 +314,7 @@ impl AppState {
             Message::PaneResized(event) => {
                 if let Screen::Timeline(state) = &mut self.screen {
                     if let Some(snapshot) = state.handle_pane_resize(event) {
-                        if let Some(tab) = self.timeline_tab_mut() {
-                            tab.layout = Some(snapshot);
-                        }
+                        self.set_active_tab_layout(TabLayout::Timeline(snapshot));
                     }
                 }
                 Task::none()
@@ -363,6 +367,26 @@ impl AppState {
                     Ok(()) => ProxyStatus::Running,
                     Err(err) => ProxyStatus::Error(err),
                 };
+                Task::none()
+            }
+            Message::ReplaySelect(index) => {
+                self.replay_state.select(index);
+                Task::none()
+            }
+            Message::ReplayUpdateDetails(body) => {
+                self.replay_state.update_request_body(body);
+                Task::none()
+            }
+            Message::ReplayPaneDragged(event) => {
+                if let Some(layout) = self.replay_state.handle_pane_drag(event) {
+                    self.set_active_tab_layout(TabLayout::Replay(layout));
+                }
+                Task::none()
+            }
+            Message::ReplayPaneResized(event) => {
+                if let Some(layout) = self.replay_state.handle_pane_resize(event) {
+                    self.set_active_tab_layout(TabLayout::Replay(layout));
+                }
                 Task::none()
             }
             Message::ToggleMenu(menu) => {
@@ -485,7 +509,7 @@ impl AppState {
                         start_index: index,
                         hover_index: index,
                     });
-                    self.config.active_tab_id = Some(tab_id);
+                    self.set_active_tab(tab_id);
                 }
                 Task::none()
             }
@@ -553,14 +577,16 @@ impl AppState {
     }
 
     fn save_tabs_and_layouts(&mut self) -> Task<Message> {
-        let layout = match &self.screen {
-            Screen::Timeline(state) => Some(state.snapshot_layout()),
+        let layout = match self.active_tab_kind() {
+            Some(TabKind::Timeline) => match &self.screen {
+                Screen::Timeline(state) => Some(TabLayout::Timeline(state.snapshot_layout())),
+                _ => None,
+            },
+            Some(TabKind::Replay) => Some(TabLayout::Replay(self.replay_state.snapshot_layout())),
             _ => None,
         };
-        if let Some(tab) = self.timeline_tab_mut() {
-            if let Some(layout) = layout {
-                tab.layout = Some(layout);
-            }
+        if let (Some(layout), Some(tab)) = (layout, self.active_tab_mut()) {
+            tab.layout = Some(layout);
         }
         Task::perform(save_gui_config(gui_config_path(), self.config.clone()), |_| {
             Message::CancelProject
@@ -696,6 +722,7 @@ impl AppState {
             Screen::Timeline(state) => {
                 let content = match self.active_tab_kind() {
                     Some(TabKind::Timeline) | None => state.view(self.focus, &self.theme),
+                    Some(TabKind::Replay) => self.replay_state.view(&self.theme),
                     Some(kind) => self.placeholder_view(kind),
                 };
                 self.wrap_with_menu(content)
@@ -1064,29 +1091,82 @@ impl AppState {
             self.config.active_tab_id = self.config.tabs.first().map(|tab| tab.id.clone());
         }
         if let Some(layout) = self.config.pane_layout.take() {
-            if let Some(tab) = self.timeline_tab_mut() {
+            if let Some(tab) = self.tab_for_kind_mut(TabKind::Timeline) {
                 if tab.layout.is_none() {
-                    tab.layout = Some(layout);
+                    tab.layout = Some(TabLayout::Timeline(layout));
                 }
             }
         }
     }
 
-    fn timeline_tab_mut(&mut self) -> Option<&mut TabConfig> {
-        self.config.tabs.iter_mut().find(|tab| tab.kind == TabKind::Timeline)
+    fn tab_for_kind_mut(&mut self, kind: TabKind) -> Option<&mut TabConfig> {
+        self.config.tabs.iter_mut().find(|tab| tab.kind == kind)
+    }
+
+    fn tab_for_kind(&self, kind: TabKind) -> Option<&TabConfig> {
+        self.config.tabs.iter().find(|tab| tab.kind == kind)
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut TabConfig> {
+        let id = self.config.active_tab_id.as_deref()?;
+        self.config.tabs.iter_mut().find(|tab| tab.id == id)
+    }
+
+    fn active_tab(&self) -> Option<&TabConfig> {
+        let id = self.config.active_tab_id.as_deref()?;
+        self.config.tabs.iter().find(|tab| tab.id == id)
     }
 
     fn timeline_tab_layout(&self) -> Option<PaneLayout> {
-        self.config
-            .tabs
-            .iter()
-            .find(|tab| tab.kind == TabKind::Timeline)
-            .and_then(|tab| tab.layout.clone())
+        let tab = self
+            .active_tab()
+            .filter(|tab| tab.kind == TabKind::Timeline)
+            .or_else(|| self.tab_for_kind(TabKind::Timeline))?;
+        match &tab.layout {
+            Some(TabLayout::Timeline(layout)) => Some(layout.clone()),
+            _ => None,
+        }
     }
 
     fn active_tab_kind(&self) -> Option<TabKind> {
         let id = self.config.active_tab_id.as_deref()?;
         self.config.tabs.iter().find(|tab| tab.id == id).map(|tab| tab.kind)
+    }
+
+    fn set_active_tab(&mut self, tab_id: String) {
+        self.config.active_tab_id = Some(tab_id);
+        self.sync_active_tab_layout();
+    }
+
+    fn sync_active_tab_layout(&mut self) {
+        let Some(tab) = self.active_tab().cloned() else {
+            return;
+        };
+        match tab.kind {
+            TabKind::Timeline => {
+                if let Screen::Timeline(state) = &mut self.screen {
+                    let layout = match tab.layout {
+                        Some(TabLayout::Timeline(layout)) => layout,
+                        _ => default_pane_layout(),
+                    };
+                    state.apply_layout(layout);
+                }
+            }
+            TabKind::Replay => {
+                let layout = match tab.layout {
+                    Some(TabLayout::Replay(layout)) => layout,
+                    _ => default_replay_layout(),
+                };
+                self.replay_state.apply_layout(layout);
+            }
+            _ => {}
+        }
+    }
+
+    fn set_active_tab_layout(&mut self, layout: TabLayout) {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.layout = Some(layout);
+        }
     }
 
     fn placeholder_view(&self, kind: TabKind) -> Element<'_, Message> {
@@ -1187,7 +1267,7 @@ impl AppState {
             kind,
             layout,
         });
-        self.config.active_tab_id = Some(id);
+        self.set_active_tab(id);
         Task::none()
     }
 
@@ -1289,6 +1369,12 @@ pub enum TabKind {
     Custom,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TabLayout {
+    Timeline(PaneLayout),
+    Replay(ReplayLayout),
+}
+
 impl TabKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -1316,7 +1402,7 @@ pub struct TabConfig {
     pub id: String,
     pub label: String,
     pub kind: TabKind,
-    pub layout: Option<PaneLayout>,
+    pub layout: Option<TabLayout>,
 }
 
 impl TabConfig {
@@ -1355,9 +1441,10 @@ fn truncate_tab_label(label: &str, max_width: f32) -> String {
     format!("{truncated}{suffix}")
 }
 
-fn default_layout_for(kind: TabKind) -> Option<PaneLayout> {
+fn default_layout_for(kind: TabKind) -> Option<TabLayout> {
     match kind {
-        TabKind::Timeline => Some(default_pane_layout()),
+        TabKind::Timeline => Some(TabLayout::Timeline(default_pane_layout())),
+        TabKind::Replay => Some(TabLayout::Replay(default_replay_layout())),
         _ => None,
     }
 }

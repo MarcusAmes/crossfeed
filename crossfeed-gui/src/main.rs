@@ -2,8 +2,10 @@ mod app;
 mod menu;
 mod project_picker;
 mod project_settings;
+mod replay;
 mod theme;
 mod timeline;
+mod ui;
 
 fn main() -> iced::Result {
     iced::application(app::APP_NAME, app::AppState::update, app::AppState::view)

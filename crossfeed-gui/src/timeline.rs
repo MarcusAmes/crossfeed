@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crossfeed_codec::{deflate_decompress, gzip_decompress};
 use crossfeed_ingest::{TailCursor, TailUpdate, TimelineItem};
-use crossfeed_storage::{ProjectConfig, ProjectPaths, ResponseSummary, SqliteStore, TimelineQuery, TimelineSort};
-use iced::widget::{PaneGrid, button, column, container, pane_grid, row, scrollable, text};
+use crossfeed_storage::{
+    ProjectConfig, ProjectPaths, ResponseSummary, SqliteStore, TimelineQuery, TimelineSort,
+};
+use iced::widget::{PaneGrid, container, pane_grid, text};
 use iced::{Element, Length, Theme};
 use serde::{Deserialize, Serialize};
 
 use crate::app::Message;
-use crate::theme::{
-    ThemePalette, badge_style, pane_border_style, text_muted, text_primary, timeline_row_style,
+use crate::theme::{ThemePalette, pane_border_style};
+use crate::ui::panes::{
+    response_preview_from_bytes, response_preview_placeholder, timeline_request_details_view,
+    timeline_request_list_view,
 };
 
 #[derive(Debug, Clone)]
@@ -103,70 +106,23 @@ impl TimelineState {
         _focus: crate::app::FocusArea,
         theme: ThemePalette,
     ) -> Element<'_, Message> {
-        let mut content = column![].spacing(12);
-
-        for (index, item) in self.timeline.iter().enumerate() {
-            let is_selected = self.selected == Some(index);
-            let tags = self.tags.get(&item.id).cloned().unwrap_or_default();
-            let response = self.responses.get(&item.id);
-            let status = response.map(|resp| resp.status_code);
-            let row = timeline_row(item, status, &tags, is_selected, theme)
-                .on_press(Message::TimelineSelected(index));
-            content = content.push(row);
-        }
-
-        scrollable(content).into()
+        timeline_request_list_view(
+            &self.timeline,
+            &self.tags,
+            &self.responses,
+            self.selected,
+            theme,
+        )
     }
 
     fn detail_view(&self, _focus: crate::app::FocusArea, theme: ThemePalette) -> Element<'_, Message> {
-        let content = if let Some(selected) = self.selected.and_then(|idx| self.timeline.get(idx)) {
-            let response = self.responses.get(&selected.id);
-            let status_text = response
-                .map(|resp| resp.status_code.to_string())
-                .unwrap_or_else(|| "Pending".to_string());
-            let duration_text = selected
-                .duration_ms
-                .map(|value| format!("{value} ms"))
-                .unwrap_or_else(|| "-".to_string());
-            let response_size = response
-                .map(|resp| format_bytes(resp.body_size, resp.body_truncated))
-                .unwrap_or_else(|| "-".to_string());
-            let completed = selected
-                .completed_at
-                .as_deref()
-                .unwrap_or("Pending")
-                .to_string();
-            let scope_current = selected
-                .scope_status_current
-                .as_deref()
-                .unwrap_or("-")
-                .to_string();
-            let request_size =
-                format_bytes(selected.request_body_size, selected.request_body_truncated);
-
-            column![
-                detail_line("URL", selected.url.clone(), theme),
-                detail_line("Method", selected.method.clone(), theme),
-                detail_line("Status", status_text, theme),
-                detail_line("HTTP", selected.http_version.clone(), theme),
-                detail_line("Started", selected.started_at.clone(), theme),
-                detail_line("Completed", completed, theme),
-                detail_line("Duration", duration_text, theme),
-                detail_line("Source", selected.source.clone(), theme),
-                detail_line("Scope", selected.scope_status_at_capture.clone(), theme),
-                detail_line("Scope current", scope_current, theme),
-                detail_line("Request size", request_size, theme),
-                detail_line("Response size", response_size, theme),
-            ]
-        } else {
-            column![text_muted("Select a request to view details", 16, theme)]
-        };
-
-        scrollable(container(content).padding(12)).into()
+        let selected = self.selected.and_then(|idx| self.timeline.get(idx));
+        let response = selected.and_then(|item| self.responses.get(&item.id));
+        timeline_request_details_view(selected, response, theme)
     }
 
     fn response_view(&self, _focus: crate::app::FocusArea, theme: ThemePalette) -> Element<'_, Message> {
-        let content = if let Some(selected) = self.selected.and_then(|idx| self.timeline.get(idx)) {
+        if let Some(selected) = self.selected.and_then(|idx| self.timeline.get(idx)) {
             let response = self.responses.get(&selected.id);
 
             if let Some(response) = response {
@@ -182,37 +138,28 @@ impl TimelineState {
                     .as_ref()
                     .map(|resp| resp.response_body.as_slice())
                     .unwrap_or(&[]);
-                let headers = render_response_headers(response_headers);
-                let body_text = render_response_body(body, &headers);
                 let status_line = response
                     .reason
                     .clone()
                     .map(|reason| format!("{} {reason}", response.status_code))
                     .unwrap_or_else(|| response.status_code.to_string());
-                let body_label = if timeline_response
+                let truncated = timeline_response
                     .as_ref()
                     .map(|resp| resp.response_body_truncated)
-                    .unwrap_or(false)
-                {
-                    "Body (truncated)"
-                } else {
-                    "Body"
-                };
-                column![
-                    detail_line("Status", status_line, theme),
-                    text_muted("Headers", 14, theme),
-                    container(text_primary(headers, 12, theme)).padding(10),
-                    text_muted(body_label, 14, theme),
-                    container(text_primary(body_text, 12, theme)).padding(10),
-                ]
+                    .unwrap_or(false);
+                response_preview_from_bytes(
+                    status_line,
+                    response_headers,
+                    body,
+                    truncated,
+                    theme,
+                )
             } else {
-                column![text_muted("No response recorded yet", 16, theme)]
+                response_preview_placeholder("No response recorded yet", theme)
             }
         } else {
-            column![text_muted("Select a request to preview response", 16, theme)]
-        };
-
-        scrollable(container(content).padding(12)).into()
+            response_preview_placeholder("Select a request to preview response", theme)
+        }
     }
 
     pub fn apply_tail_update(&mut self, update: Result<TailUpdate, String>) {
@@ -390,161 +337,4 @@ pub fn default_pane_layout() -> PaneLayout {
         .split(pane_grid::Axis::Horizontal, right, PaneKind::Response)
         .expect("Default timeline split failed");
     PaneLayout::from(&panes)
-}
-
-fn timeline_row(
-    item: &TimelineItem,
-    status: Option<u16>,
-    tags: &[String],
-    selected: bool,
-    theme: ThemePalette,
-) -> iced::widget::Button<'static, Message> {
-    let status_text = status
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    let tag_label = if tags.is_empty() {
-        "".to_string()
-    } else if tags.len() <= 3 {
-        tags.join(" · ")
-    } else {
-        format!("{} · +{}", tags[..3].join(" · "), tags.len() - 3)
-    };
-    let info = format!(
-        "{} {}{}",
-        item.host,
-        item.path,
-        item.completed_at
-            .as_ref()
-            .map(|value| format!(" ({value})"))
-            .unwrap_or_default()
-    );
-    let duration = item
-        .duration_ms
-        .map(|value| format!("{value} ms"))
-        .unwrap_or_else(|| "-".to_string());
-    let body_size = format_bytes(item.request_body_size, item.request_body_truncated);
-
-    let row = column![
-        row![
-            badge(item.method.clone(), theme),
-            badge(status_text.clone(), theme),
-            text_primary(info, 14, theme),
-        ]
-        .spacing(8),
-        row![
-            text_muted(format!("{} • {}", duration, body_size), 12, theme),
-            text_muted(tag_label, 12, theme),
-        ]
-        .spacing(8),
-    ]
-    .spacing(4);
-
-    button(row)
-        .padding(10)
-        .width(Length::Fill)
-        .style(move |_theme, status| timeline_row_style(theme, status, selected))
-}
-
-fn badge(label: String, theme: ThemePalette) -> Element<'static, Message> {
-    container(text_primary(label, 12, theme))
-        .padding(6)
-        .style(move |_| badge_style(theme))
-        .into()
-}
-
-fn detail_line(label: &'static str, value: impl Into<String>, theme: ThemePalette) -> Element<'static, Message> {
-    let value = value.into();
-    row![text_muted(label, 12, theme), text_primary(value, 14, theme)]
-        .spacing(8)
-        .into()
-}
-
-fn format_bytes(bytes: usize, truncated: bool) -> String {
-    let base = if bytes > 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes > 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    };
-    if truncated {
-        format!("{base} (truncated)")
-    } else {
-        base
-    }
-}
-
-fn render_response_headers(raw: &[u8]) -> String {
-    if raw.is_empty() {
-        return "(no headers)".to_string();
-    }
-    let header_end = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 2)
-        .unwrap_or(raw.len());
-    let header_bytes = &raw[..header_end];
-    let text = String::from_utf8_lossy(header_bytes).replace("\r\n", "\n");
-    if text.trim().is_empty() {
-        "(no headers)".to_string()
-    } else {
-        text
-    }
-}
-
-fn render_response_body(body: &[u8], headers: &str) -> String {
-    if body.is_empty() {
-        return "(empty body)".to_string();
-    }
-    let decoded = decode_response_body(body, headers);
-    match std::str::from_utf8(&decoded) {
-        Ok(text) => text.to_string(),
-        Err(_) => hex_dump(&decoded),
-    }
-}
-
-fn decode_response_body(body: &[u8], headers: &str) -> Vec<u8> {
-    let encoding = find_header_value(headers, "content-encoding")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let encoding = encoding
-        .split(',')
-        .next()
-        .map(|value| value.trim())
-        .unwrap_or("");
-    match encoding {
-        "gzip" | "x-gzip" => gzip_decompress(body).unwrap_or_else(|_| body.to_vec()),
-        "deflate" => deflate_decompress(body).unwrap_or_else(|_| body.to_vec()),
-        _ => body.to_vec(),
-    }
-}
-
-fn find_header_value(headers: &str, name: &str) -> Option<String> {
-    headers.lines().skip(1).find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        if key.trim().eq_ignore_ascii_case(name) {
-            Some(value.trim().to_string())
-        } else {
-            None
-        }
-    })
-}
-
-fn hex_dump(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return "(empty body)".to_string();
-    }
-    let mut output = String::new();
-    for (line_index, chunk) in bytes.chunks(16).enumerate() {
-        if line_index > 0 {
-            output.push('\n');
-        }
-        for (index, byte) in chunk.iter().enumerate() {
-            if index > 0 {
-                output.push(' ');
-            }
-            output.push_str(&format!("{:02x}", byte));
-        }
-    }
-    output
 }
