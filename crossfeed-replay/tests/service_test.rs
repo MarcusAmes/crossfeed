@@ -33,6 +33,7 @@ fn sample_active_request() -> ReplayRequest {
         collection_id: None,
         source_timeline_request_id: None,
         name: "GET /".to_string(),
+        sort_index: 0,
         method: "GET".to_string(),
         scheme: "http".to_string(),
         host: "example.com".to_string(),

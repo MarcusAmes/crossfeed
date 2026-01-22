@@ -2,20 +2,23 @@ use std::collections::HashMap;
 
 use crossfeed_ingest::TimelineItem;
 use crossfeed_storage::ResponseSummary;
-use iced::widget::{button, column, container, row};
-use iced::{Element, Length};
+use iced::mouse;
+use iced::widget::{button, column, container, mouse_area, row};
+use iced::{Element, Length, Point};
 
 use crate::app::Message;
 use crate::theme::{ThemePalette, badge_style, text_muted, text_primary, timeline_row_style};
 use crate::ui::panes::{format_bytes, pane_scroll};
 
-pub fn timeline_request_list_view(
-    items: &[TimelineItem],
-    tags: &HashMap<i64, Vec<String>>,
-    responses: &HashMap<i64, ResponseSummary>,
+pub fn timeline_request_list_view<'a>(
+    items: &'a [TimelineItem],
+    tags: &'a HashMap<i64, Vec<String>>,
+    responses: &'a HashMap<i64, ResponseSummary>,
     selected: Option<usize>,
     theme: ThemePalette,
-) -> Element<'static, Message> {
+    on_context: Option<fn(i64) -> Message>,
+    on_move: Option<fn(Point) -> Message>,
+) -> Element<'a, Message> {
     let mut content = column![].spacing(12);
 
     for (index, item) in items.iter().enumerate() {
@@ -25,10 +28,26 @@ pub fn timeline_request_list_view(
         let status = response.map(|resp| resp.status_code);
         let row = timeline_row(item, status, &tags, is_selected, theme)
             .on_press(Message::TimelineSelected(index));
-        content = content.push(row);
+        let element: Element<'a, Message> = if let Some(on_context) = on_context {
+            mouse_area(row)
+                .on_right_press(on_context(item.id))
+                .interaction(mouse::Interaction::Pointer)
+                .into()
+        } else {
+            row.into()
+        };
+        content = content.push(element);
     }
 
-    pane_scroll(content.into())
+    let list = pane_scroll(content.into());
+    if let Some(on_move) = on_move {
+        mouse_area(list)
+            .on_move(on_move)
+            .interaction(mouse::Interaction::Pointer)
+            .into()
+    } else {
+        list
+    }
 }
 
 fn timeline_row(

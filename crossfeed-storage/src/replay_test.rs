@@ -36,6 +36,7 @@ fn sample_replay_request(source_timeline_request_id: i64) -> ReplayRequest {
         collection_id: None,
         source_timeline_request_id: Some(source_timeline_request_id),
         name: "GET /".to_string(),
+        sort_index: 0,
         method: "GET".to_string(),
         scheme: "http".to_string(),
         host: "example.com".to_string(),

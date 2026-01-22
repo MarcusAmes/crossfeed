@@ -2,6 +2,11 @@ use std::path::PathBuf;
 
 use crossfeed_ingest::{
     ProjectContext, ProxyRuntimeConfig, TailCursor, TailUpdate,
+    create_collection_and_add_request, create_replay_collection, create_replay_from_timeline,
+    duplicate_replay_request, get_latest_replay_execution, get_latest_replay_response,
+    get_replay_active_version, list_replay_collections, list_replay_requests_in_collection,
+    list_replay_requests_unassigned, move_replay_request_to_collection,
+    update_replay_collection_sort, update_replay_request_name, update_replay_request_sort,
     open_or_create_project, start_proxy, tail_query,
 };
 use crossfeed_storage::{ProjectConfig, ProjectPaths, SqliteStore};
@@ -47,6 +52,7 @@ const TAB_CHAR_WIDTH: f32 = 7.5;
 const TAB_MAX_WIDTH: f32 = 200.0;
 const TAB_TEXT_FUDGE: f32 = 8.0;
 const VIEW_SUBMENU_GAP: f32 = 6.0;
+const TAB_BAR_HEIGHT: f32 = 36.0;
 
 #[derive(Debug, Clone)]
 pub enum Screen {
@@ -77,10 +83,38 @@ pub enum Message {
     TailTick,
     TailLoaded(Result<TailUpdate, String>),
     ProxyStarted(Result<(), String>),
-    ReplaySelect(usize),
+    ReplaySelect(i64),
     ReplayUpdateDetails(text_editor::Action),
     ReplayPaneDragged(pane_grid::DragEvent),
     ReplayPaneResized(pane_grid::ResizeEvent),
+    ReplayLoaded(Result<ReplayListData, String>),
+    ReplayActiveVersionLoaded(Result<Option<crossfeed_storage::ReplayVersion>, String>),
+    ReplayResponseLoaded(Result<Option<crossfeed_storage::TimelineResponse>, String>),
+    ReplayToggleCollection(i64),
+    ReplayListCursor(iced::Point),
+    ReplayContextMenuOpen(i64),
+    ReplayContextMenuClose,
+    ReplayDuplicate(i64),
+    ReplayRenamePrompt(i64),
+    ReplayPromptLabel(String),
+    ReplayPromptConfirm,
+    ReplayPromptCancel,
+    ReplayAddToCollectionMenu(bool),
+    ReplayCollectionMenuHover(bool),
+    ReplayCollectionMenuBridgeHover(bool),
+    ReplayCollectionMenuExit,
+    ReplayAddToCollection(i64),
+    ReplayNewCollectionPrompt(i64),
+    ReplayCreateCollection,
+    ReplayCreatedFromTimeline(Result<i64, String>),
+    ReplayDragStart(i64, Option<i64>),
+    ReplayDragHover(ReplayDropTarget),
+    ReplayDragHoverClear,
+    ReplayDragEnd,
+    TimelineListCursor(Point),
+    TimelineContextMenuOpen(i64),
+    TimelineContextMenuClose,
+    TimelineSendToReplay(i64),
     ToggleMenu(MenuKind),
     LoadedTheme(Result<ThemeConfig, String>),
     OpenNewTabPrompt,
@@ -177,6 +211,19 @@ pub struct AppState {
     pub view_panes_submenu_hover: bool,
     pub view_panes_bridge_hover: bool,
     pub custom_tabs: HashMap<String, pane_grid::State<PaneModuleKind>>,
+    pub timeline_list_cursor: Option<Point>,
+    pub timeline_context_menu: Option<TimelineContextMenu>,
+    pub replay_list_cursor: Option<Point>,
+    pub replay_context_menu: Option<ReplayContextMenu>,
+    pub replay_prompt_label: String,
+    pub replay_prompt_mode: Option<ReplayPromptMode>,
+    pub replay_prompt_input_id: text_input::Id,
+    pub replay_collection_menu_open: bool,
+    pub replay_collection_hover: bool,
+    pub replay_collection_menu_hover: bool,
+    pub replay_collection_bridge_hover: bool,
+    pub replay_drag: Option<ReplayDragState>,
+    pub replay_drag_hover: Option<ReplayDropTarget>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +243,47 @@ pub struct TabDragState {
     pub tab_id: String,
     pub start_index: usize,
     pub hover_index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayContextMenu {
+    pub request_id: i64,
+    pub position: Point,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayDropTarget {
+    Request {
+        request_id: i64,
+        collection_id: Option<i64>,
+    },
+    Collection {
+        collection_id: Option<i64>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayDragState {
+    pub request_id: i64,
+    pub source_collection_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TimelineContextMenu {
+    pub request_id: i64,
+    pub position: Point,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReplayPromptMode {
+    Rename(i64),
+    NewCollection(i64),
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayListData {
+    pub collections: Vec<crossfeed_storage::ReplayCollection>,
+    pub requests_by_collection: HashMap<Option<i64>, Vec<crossfeed_storage::ReplayRequest>>,
 }
 
 impl AppState {
@@ -226,6 +314,19 @@ impl AppState {
             view_panes_submenu_hover: false,
             view_panes_bridge_hover: false,
             custom_tabs: HashMap::new(),
+            timeline_list_cursor: None,
+            timeline_context_menu: None,
+            replay_list_cursor: None,
+            replay_context_menu: None,
+            replay_prompt_label: String::new(),
+            replay_prompt_mode: None,
+            replay_prompt_input_id: text_input::Id::unique(),
+            replay_collection_menu_open: false,
+            replay_collection_hover: false,
+            replay_collection_menu_hover: false,
+            replay_collection_bridge_hover: false,
+            replay_drag: None,
+            replay_drag_hover: None,
         };
         state.ensure_tabs();
         (state, Task::batch([config_task, theme_task]))
@@ -312,11 +413,13 @@ impl AppState {
                     self.proxy_state.status = ProxyStatus::Starting;
                     self.screen = Screen::Timeline(timeline);
                     self.sync_active_tab_layout();
+                    self.replay_state.set_store_path(self.project_store_path());
                     Task::batch([
                         Task::perform(
                             save_gui_config(gui_config_path(), self.config.clone()),
                             |_| Message::CancelProject,
                         ),
+                        self.load_replay_list(),
                         proxy_task,
                     ])
                 }
@@ -395,7 +498,10 @@ impl AppState {
             }
             Message::ReplaySelect(index) => {
                 self.replay_state.select(index);
-                Task::none()
+                Task::batch([
+                    self.load_replay_active_version(index),
+                    self.load_replay_response(index),
+                ])
             }
             Message::ReplayUpdateDetails(body) => {
                 self.replay_state.apply_editor_action(body);
@@ -412,6 +518,201 @@ impl AppState {
                     self.set_active_tab_layout(TabLayout::Replay(layout));
                 }
                 Task::none()
+            }
+            Message::ReplayLoaded(result) => {
+                if let Ok(data) = result {
+                    self.replay_state.set_replay_data(data.collections, data.requests_by_collection);
+                }
+                Task::none()
+            }
+            Message::ReplayActiveVersionLoaded(result) => {
+                if let Ok(version) = result {
+                    self.replay_state.set_active_version(version);
+                }
+                Task::none()
+            }
+            Message::ReplayResponseLoaded(result) => {
+                if let Ok(response) = result {
+                    self.replay_state.set_latest_response(response);
+                }
+                Task::none()
+            }
+            Message::ReplayToggleCollection(collection_id) => {
+                self.replay_state.toggle_collection(collection_id);
+                Task::none()
+            }
+            Message::ReplayListCursor(point) => {
+                self.replay_list_cursor = Some(point);
+                Task::none()
+            }
+            Message::ReplayContextMenuOpen(request_id) => {
+                if let Some(position) = self.replay_list_cursor {
+                    self.replay_context_menu = Some(ReplayContextMenu {
+                        request_id,
+                        position: replay_list_to_window(position),
+                    });
+                    self.replay_collection_menu_open = false;
+                    self.replay_collection_hover = false;
+                    self.replay_collection_menu_hover = false;
+                    self.replay_collection_bridge_hover = false;
+                }
+                Task::none()
+            }
+            Message::ReplayContextMenuClose => {
+                self.replay_context_menu = None;
+                self.replay_collection_menu_open = false;
+                self.replay_collection_hover = false;
+                self.replay_collection_menu_hover = false;
+                self.replay_collection_bridge_hover = false;
+                Task::none()
+            }
+            Message::ReplayDuplicate(request_id) => {
+                self.replay_context_menu = None;
+                self.replay_collection_menu_open = false;
+                Task::batch([
+                    self.duplicate_replay_request(request_id),
+                    self.load_replay_list(),
+                ])
+            }
+            Message::ReplayRenamePrompt(request_id) => {
+                self.replay_context_menu = None;
+                self.replay_prompt_label = self
+                    .replay_state
+                    .request_name(request_id)
+                    .unwrap_or_default();
+                self.replay_prompt_mode = Some(ReplayPromptMode::Rename(request_id));
+                Task::batch([
+                    text_input::focus(self.replay_prompt_input_id.clone()),
+                    text_input::move_cursor_to_end(self.replay_prompt_input_id.clone()),
+                ])
+            }
+            Message::ReplayPromptLabel(label) => {
+                self.replay_prompt_label = label;
+                Task::none()
+            }
+            Message::ReplayPromptConfirm => self.confirm_replay_prompt(),
+            Message::ReplayPromptCancel => {
+                self.replay_prompt_mode = None;
+                Task::none()
+            }
+            Message::ReplayAddToCollectionMenu(hovered) => {
+                self.replay_collection_hover = hovered;
+                if hovered {
+                    self.replay_collection_menu_open = true;
+                }
+                Task::none()
+            }
+            Message::ReplayCollectionMenuHover(hovered) => {
+                self.replay_collection_menu_hover = hovered;
+                if hovered {
+                    self.replay_collection_menu_open = true;
+                }
+                Task::none()
+            }
+            Message::ReplayCollectionMenuBridgeHover(hovered) => {
+                self.replay_collection_bridge_hover = hovered;
+                if hovered {
+                    self.replay_collection_menu_open = true;
+                }
+                Task::none()
+            }
+            Message::ReplayCollectionMenuExit => {
+                self.replay_collection_menu_open = false;
+                self.replay_collection_hover = false;
+                self.replay_collection_menu_hover = false;
+                self.replay_collection_bridge_hover = false;
+                Task::none()
+            }
+            Message::ReplayAddToCollection(collection_id) => {
+                let request_id = match self.replay_context_menu.as_ref() {
+                    Some(menu) => menu.request_id,
+                    None => return Task::none(),
+                };
+                self.replay_context_menu = None;
+                self.replay_collection_menu_open = false;
+                Task::batch([
+                    self.move_replay_request_to_collection(request_id, Some(collection_id)),
+                    self.load_replay_list(),
+                ])
+            }
+            Message::ReplayNewCollectionPrompt(request_id) => {
+                self.replay_context_menu = None;
+                self.replay_prompt_label.clear();
+                self.replay_prompt_mode = Some(ReplayPromptMode::NewCollection(request_id));
+                Task::batch([
+                    text_input::focus(self.replay_prompt_input_id.clone()),
+                    text_input::move_cursor_to_end(self.replay_prompt_input_id.clone()),
+                ])
+            }
+            Message::ReplayCreateCollection => self.confirm_replay_prompt(),
+            Message::ReplayCreatedFromTimeline(result) => {
+                if let Ok(request_id) = result {
+                    self.replay_state.select(request_id);
+                    return Task::batch([
+                        self.load_replay_list(),
+                        self.load_replay_active_version(request_id),
+                        self.load_replay_response(request_id),
+                    ]);
+                }
+                Task::none()
+            }
+            Message::ReplayDragStart(request_id, collection_id) => {
+                self.replay_context_menu = None;
+                self.replay_drag = Some(ReplayDragState {
+                    request_id,
+                    source_collection_id: collection_id,
+                });
+                self.replay_drag_hover = Some(ReplayDropTarget::Request {
+                    request_id,
+                    collection_id,
+                });
+                self.replay_state.select(request_id);
+                Task::batch([
+                    self.load_replay_active_version(request_id),
+                    self.load_replay_response(request_id),
+                ])
+            }
+            Message::ReplayDragHover(target) => {
+                if self.replay_drag.is_some() {
+                    self.replay_drag_hover = Some(target);
+                }
+                Task::none()
+            }
+            Message::ReplayDragHoverClear => {
+                if self.replay_drag.is_some() {
+                    self.replay_drag_hover = None;
+                }
+                Task::none()
+            }
+            Message::ReplayDragEnd => {
+                let drag = self.replay_drag.take();
+                let target = self.replay_drag_hover.take();
+                if let (Some(drag), Some(target)) = (drag, target) {
+                    self.apply_replay_drag(drag, target)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::TimelineListCursor(point) => {
+                self.timeline_list_cursor = Some(point);
+                Task::none()
+            }
+            Message::TimelineContextMenuOpen(request_id) => {
+                if let Some(position) = self.timeline_list_cursor {
+                    self.timeline_context_menu = Some(TimelineContextMenu {
+                        request_id,
+                        position: timeline_list_to_window(position),
+                    });
+                }
+                Task::none()
+            }
+            Message::TimelineContextMenuClose => {
+                self.timeline_context_menu = None;
+                Task::none()
+            }
+            Message::TimelineSendToReplay(request_id) => {
+                self.timeline_context_menu = None;
+                self.send_timeline_to_replay(request_id)
             }
             Message::ToggleMenu(menu) => {
                 if self.active_menu == Some(menu) {
@@ -804,6 +1105,18 @@ impl AppState {
                     self.tab_context_menu = None;
                     return Task::none();
                 }
+                if self.replay_context_menu.is_some() {
+                    self.replay_context_menu = None;
+                    self.replay_collection_menu_open = false;
+                    self.replay_collection_hover = false;
+                    self.replay_collection_menu_hover = false;
+                    self.replay_collection_bridge_hover = false;
+                    return Task::none();
+                }
+                if self.timeline_context_menu.is_some() {
+                    self.timeline_context_menu = None;
+                    return Task::none();
+                }
                 if self.active_menu.is_some() {
                     self.active_menu = None;
                     self.view_tabs_open = false;
@@ -864,7 +1177,12 @@ impl AppState {
                         if matches!(active_tab.as_ref().and_then(|tab| tab.layout.as_ref()), Some(TabLayout::Custom(_))) {
                             self.custom_tab_view(TabKind::Timeline, &self.theme)
                         } else {
-                            state.view(self.focus, &self.theme)
+                            state.view(
+                                self.focus,
+                                &self.theme,
+                                Some(Message::TimelineContextMenuOpen),
+                                Some(Message::TimelineListCursor),
+                            )
                         }
                     }
                     Some(TabKind::Replay) => {
@@ -906,6 +1224,15 @@ impl AppState {
         }
         if let Some(context_menu) = self.tab_context_menu_overlay() {
             layers.push(context_menu);
+        }
+        if let Some(timeline_menu) = self.timeline_context_menu_overlay() {
+            layers.push(timeline_menu);
+        }
+        if let Some(replay_menu) = self.replay_context_menu_overlay() {
+            layers.push(replay_menu);
+        }
+        if let Some(prompt) = self.replay_prompt_view() {
+            layers.push(prompt);
         }
         if let Some(prompt) = self.tab_prompt_view() {
             layers.push(prompt);
@@ -1111,22 +1438,16 @@ impl AppState {
                 ],
                 &self.theme,
             );
-            let submenu = mouse_area(submenu)
-                .on_enter(Message::ViewSubmenuHover(true))
-                .on_exit(Message::ViewSubmenuHover(false))
-                .interaction(mouse::Interaction::Pointer);
-
-            let tabs_region = submenu_with_bridge(
+            region = submenu_region(
                 region,
-                submenu.into(),
+                submenu,
                 VIEW_SUBMENU_GAP,
+                Message::ViewSubmenuHover(true),
+                Message::ViewSubmenuHover(false),
                 Message::ViewSubmenuBridgeHover(true),
                 Message::ViewSubmenuBridgeHover(false),
+                Message::ViewTabsRegionExit,
             );
-            region = mouse_area(tabs_region)
-                .on_exit(Message::ViewTabsRegionExit)
-                .interaction(mouse::Interaction::Pointer)
-                .into();
         }
 
         if panes_hover {
@@ -1165,22 +1486,16 @@ impl AppState {
                 ],
                 &self.theme,
             );
-            let panes_menu = mouse_area(panes_menu)
-                .on_enter(Message::ViewPanesSubmenuHover(true))
-                .on_exit(Message::ViewPanesSubmenuHover(false))
-                .interaction(mouse::Interaction::Pointer);
-
-            let panes_region = submenu_with_bridge(
+            region = submenu_region(
                 region,
-                panes_menu.into(),
+                panes_menu,
                 VIEW_SUBMENU_GAP,
+                Message::ViewPanesSubmenuHover(true),
+                Message::ViewPanesSubmenuHover(false),
                 Message::ViewPanesBridgeHover(true),
                 Message::ViewPanesBridgeHover(false),
+                Message::ViewPanesRegionExit,
             );
-            region = mouse_area(panes_region)
-                .on_exit(Message::ViewPanesRegionExit)
-                .interaction(mouse::Interaction::Pointer)
-                .into();
         }
 
         region
@@ -1402,6 +1717,14 @@ impl AppState {
         }
     }
 
+    fn project_store_path(&self) -> PathBuf {
+        match &self.screen {
+            Screen::Timeline(state) => state.store_path.clone(),
+            Screen::ProjectSettings(settings) => settings.project_paths.database.clone(),
+            Screen::ProjectPicker(_) => PathBuf::new(),
+        }
+    }
+
     fn ensure_custom_state(&mut self, tab: &TabConfig) {
         let layout = match tab.layout.clone() {
             Some(TabLayout::Custom(layout)) => layout,
@@ -1485,6 +1808,8 @@ impl AppState {
                             &state.responses,
                             state.selected,
                             theme,
+                            Some(Message::TimelineContextMenuOpen),
+                            Some(Message::TimelineListCursor),
                         )
                     } else {
                         self.pane_placeholder("No timeline data", theme)
@@ -1563,7 +1888,7 @@ impl AppState {
     }
 
     fn pane_placeholder(&self, label: &str, theme: ThemePalette) -> Element<'_, Message> {
-        container(column![text_muted(label, 16, theme)])
+        container(column![text_muted(label.to_string(), 16, theme)])
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Alignment::Center)
@@ -1612,6 +1937,214 @@ impl AppState {
         ]);
 
         Some(container(overlay).width(Length::Fill).height(Length::Fill).into())
+    }
+
+    fn replay_context_menu_overlay<'a>(&'a self) -> Option<Element<'a, Message>> {
+        let menu = self.replay_context_menu.as_ref()?;
+        let mut items = column![].spacing(6);
+
+        let duplicate = iced::widget::button(text("Duplicate").size(12).color(self.theme.text))
+            .on_press(Message::ReplayDuplicate(menu.request_id))
+            .padding([4, 10])
+            .width(Length::Fill)
+            .style({
+                let theme = self.theme;
+                move |_theme, status| menu_item_button_style(theme, status, true)
+            });
+        let rename = iced::widget::button(text("Rename").size(12).color(self.theme.text))
+            .on_press(Message::ReplayRenamePrompt(menu.request_id))
+            .padding([4, 10])
+            .width(Length::Fill)
+            .style({
+                let theme = self.theme;
+                move |_theme, status| menu_item_button_style(theme, status, true)
+            });
+
+        let collection_label = row![
+            text("Add to Collection").size(12).color(self.theme.text),
+            Space::new(Length::Fill, Length::Shrink),
+            text("▶").size(10).color(self.theme.muted_text),
+        ]
+        .align_y(Alignment::Center);
+        let collection_button = iced::widget::button(collection_label)
+            .padding([4, 10])
+            .width(Length::Fill)
+            .style({
+                let theme = self.theme;
+                move |_theme, status| menu_item_button_style(theme, status, true)
+            });
+        let collection_area = mouse_area(collection_button)
+            .on_enter(Message::ReplayAddToCollectionMenu(true))
+            .on_exit(Message::ReplayAddToCollectionMenu(false))
+            .interaction(mouse::Interaction::Pointer);
+
+        items = items.push(collection_area).push(rename).push(duplicate);
+
+        let panel = container(items)
+            .padding(8)
+            .width(Length::Fixed(220.0))
+            .style({
+                let theme = self.theme;
+                move |_| menu_panel_style(theme)
+            });
+
+        let mut region: Element<'a, Message> = panel.into();
+        if self.replay_collection_menu_open {
+            let mut submenu_content = column![].spacing(6);
+            let new_button = iced::widget::button(text("New Collection...").size(12).color(self.theme.text))
+                .on_press(Message::ReplayNewCollectionPrompt(menu.request_id))
+                .padding([4, 10])
+                .width(Length::Fill)
+                .style({
+                    let theme = self.theme;
+                    move |_theme, status| menu_item_button_style(theme, status, true)
+                });
+            submenu_content = submenu_content.push(new_button);
+            for collection in self.replay_state.collections() {
+                let button = iced::widget::button(text(collection.name.clone()).size(12).color(self.theme.text))
+                    .on_press(Message::ReplayAddToCollection(collection.id))
+                    .padding([4, 10])
+                    .width(Length::Fill)
+                    .style({
+                        let theme = self.theme;
+                        move |_theme, status| menu_item_button_style(theme, status, true)
+                    });
+                submenu_content = submenu_content.push(button);
+            }
+            let submenu = container(submenu_content)
+                .padding(8)
+                .width(Length::Fixed(220.0))
+                .style({
+                    let theme = self.theme;
+                    move |_| menu_panel_style(theme)
+                });
+            region = submenu_region(
+                region,
+                submenu.into(),
+                VIEW_SUBMENU_GAP,
+                Message::ReplayCollectionMenuHover(true),
+                Message::ReplayCollectionMenuHover(false),
+                Message::ReplayCollectionMenuBridgeHover(true),
+                Message::ReplayCollectionMenuBridgeHover(false),
+                Message::ReplayCollectionMenuExit,
+            );
+        }
+
+        let backdrop = mouse_area(container(Space::new(Length::Fill, Length::Fill)))
+            .on_press(Message::ReplayContextMenuClose)
+            .on_right_press(Message::ReplayContextMenuClose)
+            .interaction(mouse::Interaction::Pointer);
+
+        let overlay = stack(vec![
+            backdrop.into(),
+            container(column![
+                Space::new(Length::Shrink, Length::Fixed(menu.position.y)),
+                row![
+                    Space::new(Length::Fixed(menu.position.x), Length::Shrink),
+                    region
+                ]
+                .align_y(Alignment::Start)
+            ])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Start)
+            .align_y(Alignment::Start)
+            .into(),
+        ]);
+
+        Some(container(overlay).width(Length::Fill).height(Length::Fill).into())
+    }
+
+    fn timeline_context_menu_overlay<'a>(&'a self) -> Option<Element<'a, Message>> {
+        let menu = self.timeline_context_menu.as_ref()?;
+        let panel = container(
+            column![
+                iced::widget::button(text("Send to replay").size(12).color(self.theme.text))
+                    .on_press(Message::TimelineSendToReplay(menu.request_id))
+                    .padding([4, 10])
+                    .width(Length::Fill)
+                    .style({
+                        let theme = self.theme;
+                        move |_theme, status| menu_item_button_style(theme, status, true)
+                    })
+            ]
+            .spacing(6),
+        )
+        .padding(8)
+        .width(Length::Fixed(200.0))
+        .style({
+            let theme = self.theme;
+            move |_| menu_panel_style(theme)
+        });
+
+        let backdrop = mouse_area(container(Space::new(Length::Fill, Length::Fill)))
+            .on_press(Message::TimelineContextMenuClose)
+            .on_right_press(Message::TimelineContextMenuClose)
+            .interaction(mouse::Interaction::Pointer);
+
+        let overlay = stack(vec![
+            backdrop.into(),
+            container(column![
+                Space::new(Length::Shrink, Length::Fixed(menu.position.y)),
+                row![
+                    Space::new(Length::Fixed(menu.position.x), Length::Shrink),
+                    panel
+                ]
+                .align_y(Alignment::Start)
+            ])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Start)
+            .align_y(Alignment::Start)
+            .into(),
+        ]);
+
+        Some(container(overlay).width(Length::Fill).height(Length::Fill).into())
+    }
+
+    fn replay_prompt_view<'a>(&'a self) -> Option<Element<'a, Message>> {
+        let mode = self.replay_prompt_mode.as_ref()?;
+        let title = match mode {
+            ReplayPromptMode::Rename(_) => "Rename replay request",
+            ReplayPromptMode::NewCollection(_) => "New collection",
+        };
+        let confirm_label = match mode {
+            ReplayPromptMode::Rename(_) => "Save",
+            ReplayPromptMode::NewCollection(_) => "Create",
+        };
+        let prompt = container(
+            column![
+                text_primary(title, 16, self.theme),
+                text_input("Name", &self.replay_prompt_label)
+                    .id(self.replay_prompt_input_id.clone())
+                    .on_input(Message::ReplayPromptLabel)
+                    .padding(8)
+                    .style({
+                        let theme = self.theme;
+                        move |_theme, status| text_input_style(theme, status)
+                    }),
+                row![
+                    action_button(confirm_label, Message::ReplayPromptConfirm, self.theme),
+                    action_button("Cancel", Message::ReplayPromptCancel, self.theme),
+                ]
+                .spacing(12),
+            ]
+            .spacing(12),
+        )
+        .padding(16)
+        .style({
+            let theme = self.theme;
+            move |_| menu_panel_style(theme)
+        });
+
+        Some(
+            container(prompt)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .into(),
+        )
     }
 
     fn confirm_tab_prompt(&mut self) -> Task<Message> {
@@ -1686,6 +2219,139 @@ impl AppState {
         if let Some(layout) = layout {
             self.set_active_tab_layout(TabLayout::Custom(layout));
         }
+    }
+
+    fn load_replay_list(&self) -> Task<Message> {
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        Task::perform(fetch_replay_list(path), Message::ReplayLoaded)
+    }
+
+    fn load_replay_active_version(&self, request_id: i64) -> Task<Message> {
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        Task::perform(get_replay_active_version(path, request_id), Message::ReplayActiveVersionLoaded)
+    }
+
+    fn load_replay_response(&self, request_id: i64) -> Task<Message> {
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        Task::perform(get_latest_replay_response(path, request_id), Message::ReplayResponseLoaded)
+    }
+
+    fn duplicate_replay_request(&self, request_id: i64) -> Task<Message> {
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        Task::perform(duplicate_replay_request(path, request_id), |_| Message::ReplayContextMenuClose)
+    }
+
+    fn move_replay_request_to_collection(
+        &self,
+        request_id: i64,
+        collection_id: Option<i64>,
+    ) -> Task<Message> {
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        Task::perform(move_replay_request_to_collection(path, request_id, collection_id), |_| {
+            Message::ReplayContextMenuClose
+        })
+    }
+
+    fn confirm_replay_prompt(&mut self) -> Task<Message> {
+        let label = self.replay_prompt_label.trim();
+        let Some(mode) = self.replay_prompt_mode.clone() else {
+            return Task::none();
+        };
+        if label.is_empty() {
+            return Task::none();
+        }
+        self.replay_prompt_mode = None;
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        match mode {
+            ReplayPromptMode::Rename(request_id) => Task::batch([
+                Task::perform(
+                    update_replay_request_name(path, request_id, label.to_string()),
+                    |_| Message::ReplayContextMenuClose,
+                ),
+                self.load_replay_list(),
+            ]),
+            ReplayPromptMode::NewCollection(request_id) => Task::batch([
+                Task::perform(
+                    create_collection_and_add_request(path.clone(), label.to_string(), request_id),
+                    |_| Message::ReplayContextMenuClose,
+                ),
+                self.load_replay_list(),
+            ]),
+        }
+    }
+
+    fn apply_replay_drag(&self, drag: ReplayDragState, target: ReplayDropTarget) -> Task<Message> {
+        if matches!(
+            target,
+            ReplayDropTarget::Request {
+                request_id,
+                collection_id,
+            } if request_id == drag.request_id && collection_id == drag.source_collection_id
+        ) {
+            return Task::none();
+        }
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        let target_collection = match target {
+            ReplayDropTarget::Request { collection_id, .. } => collection_id,
+            ReplayDropTarget::Collection { collection_id } => collection_id,
+        };
+        let target_request_id = match target {
+            ReplayDropTarget::Request { request_id, .. } => Some(request_id),
+            ReplayDropTarget::Collection { .. } => None,
+        };
+        let mut ordered: Vec<i64> = self
+            .replay_state
+            .requests_in_collection(target_collection)
+            .map(|items| items.iter().map(|item| item.id).collect())
+            .unwrap_or_default();
+        ordered.retain(|id| *id != drag.request_id);
+        if let Some(target_id) = target_request_id {
+            let insert_at = ordered
+                .iter()
+                .position(|id| *id == target_id)
+                .unwrap_or(ordered.len());
+            ordered.insert(insert_at, drag.request_id);
+        } else {
+            ordered.push(drag.request_id);
+        }
+
+        let mut tasks = Vec::new();
+        for (index, request_id) in ordered.iter().enumerate() {
+            let sort_index = (ordered.len() - index) as i64;
+            tasks.push(Task::perform(
+                update_replay_request_sort(path.clone(), *request_id, target_collection, sort_index),
+                |_| Message::ReplayContextMenuClose,
+            ));
+        }
+        tasks.push(self.load_replay_list());
+        tasks.push(self.load_replay_active_version(drag.request_id));
+        tasks.push(self.load_replay_response(drag.request_id));
+        Task::batch(tasks)
+    }
+
+    fn send_timeline_to_replay(&self, request_id: i64) -> Task<Message> {
+        let path = self.project_store_path();
+        if path.as_os_str().is_empty() {
+            return Task::none();
+        }
+        Task::perform(
+            create_replay_from_timeline(path, request_id),
+            Message::ReplayCreatedFromTimeline,
+        )
     }
 
     fn delete_tab(&mut self, tab_id: String) {
@@ -1976,6 +2642,21 @@ fn custom_layout_for_tab(kind: TabKind) -> CustomLayout {
     }
 }
 
+async fn fetch_replay_list(store_path: PathBuf) -> Result<ReplayListData, String> {
+    let collections = list_replay_collections(store_path.clone()).await?;
+    let mut requests_by_collection: HashMap<Option<i64>, Vec<crossfeed_storage::ReplayRequest>> = HashMap::new();
+    let unassigned = list_replay_requests_unassigned(store_path.clone()).await?;
+    requests_by_collection.insert(None, unassigned);
+    for collection in &collections {
+        let requests = list_replay_requests_in_collection(store_path.clone(), collection.id).await?;
+        requests_by_collection.insert(Some(collection.id), requests);
+    }
+    Ok(ReplayListData {
+        collections,
+        requests_by_collection,
+    })
+}
+
 fn default_layout_for(kind: TabKind) -> Option<TabLayout> {
     match kind {
         TabKind::Timeline => Some(TabLayout::Timeline(default_pane_layout())),
@@ -1990,6 +2671,14 @@ fn tab_bar_to_window(point: Point) -> Point {
         point.x + TAB_BAR_PADDING_X,
         point.y + MENU_HEIGHT + TAB_BAR_PADDING_Y,
     )
+}
+
+fn timeline_list_to_window(point: Point) -> Point {
+    Point::new(point.x, point.y + MENU_HEIGHT + TAB_BAR_HEIGHT)
+}
+
+fn replay_list_to_window(point: Point) -> Point {
+    Point::new(point.x, point.y + MENU_HEIGHT + TAB_BAR_HEIGHT)
 }
 
 fn submenu_with_bridge<'a>(
@@ -2010,6 +2699,33 @@ fn submenu_with_bridge<'a>(
     row![panel, bridge, submenu]
         .spacing(0)
         .align_y(Alignment::Start)
+        .into()
+}
+
+fn submenu_region<'a>(
+    panel: Element<'a, Message>,
+    submenu: Element<'a, Message>,
+    bridge_width: f32,
+    on_enter: Message,
+    on_exit: Message,
+    bridge_on_enter: Message,
+    bridge_on_exit: Message,
+    on_region_exit: Message,
+) -> Element<'a, Message> {
+    let submenu = mouse_area(submenu)
+        .on_enter(on_enter)
+        .on_exit(on_exit)
+        .interaction(mouse::Interaction::Pointer);
+    let region = submenu_with_bridge(
+        panel,
+        submenu.into(),
+        bridge_width,
+        bridge_on_enter,
+        bridge_on_exit,
+    );
+    mouse_area(region)
+        .on_exit(on_region_exit)
+        .interaction(mouse::Interaction::Pointer)
         .into()
 }
 

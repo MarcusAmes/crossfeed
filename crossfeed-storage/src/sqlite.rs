@@ -4,7 +4,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::query::{TimelineQuery, TimelineSort};
-use crate::replay::{ReplayExecution, ReplayRequest, ReplayVersion};
+use crate::replay::{ReplayCollection, ReplayExecution, ReplayRequest, ReplayVersion};
 use crate::schema::SchemaCatalog;
 use crate::timeline::{TimelineInsertResult, TimelineRequest, TimelineResponse, TimelineStore};
 
@@ -117,6 +117,17 @@ impl SqliteStore {
             }
         }
 
+        self.ensure_column(
+            "replay_collections",
+            "sort_index",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        self.ensure_column(
+            "replay_requests",
+            "sort_index",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+
         if self.config.fts.enabled {
             self.create_fts_tables()?;
         }
@@ -162,6 +173,26 @@ impl SqliteStore {
             )
             .map_err(|err| err.to_string())?;
 
+        Ok(())
+    }
+
+    fn ensure_column(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), String> {
+        let sql = format!("PRAGMA table_info({table})");
+        let mut stmt = self.conn.prepare(&sql).map_err(|err| err.to_string())?;
+        let mut rows = stmt.query([]).map_err(|err| err.to_string())?;
+        while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+            let name: String = row.get(1).map_err(|err| err.to_string())?;
+            if name == column {
+                return Ok(());
+            }
+        }
+        let alter = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+        self.conn.execute(&alter, []).map_err(|err| err.to_string())?;
         Ok(())
     }
 
@@ -268,14 +299,15 @@ impl SqliteStore {
         self.conn
             .execute(
                 "INSERT INTO replay_requests (
-                    collection_id, source_timeline_request_id, name, method, scheme, host, port,
+                    collection_id, source_timeline_request_id, name, sort_index, method, scheme, host, port,
                     path, query, url, http_version, request_headers, request_body, request_body_size,
                     active_version_id, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     request.collection_id,
                     request.source_timeline_request_id,
                     request.name,
+                    request.sort_index,
                     request.method,
                     request.scheme,
                     request.host,
@@ -410,6 +442,106 @@ impl TimelineStore for SqliteStore {
 }
 
 impl SqliteStore {
+    pub fn list_replay_collections(&self) -> Result<Vec<ReplayCollection>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, sort_index, created_at FROM replay_collections ORDER BY sort_index DESC")
+            .map_err(|err| err.to_string())?;
+        let mut rows = stmt.query([]).map_err(|err| err.to_string())?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+            results.push(ReplayCollection {
+                id: row.get(0).map_err(|err| err.to_string())?,
+                name: row.get(1).map_err(|err| err.to_string())?,
+                sort_index: row.get(2).map_err(|err| err.to_string())?,
+                created_at: row.get(3).map_err(|err| err.to_string())?,
+            });
+        }
+        Ok(results)
+    }
+
+    pub fn list_replay_requests_in_collection(
+        &self,
+        collection_id: i64,
+    ) -> Result<Vec<ReplayRequest>, String> {
+        self.list_replay_requests("collection_id = ?1", [collection_id])
+    }
+
+    pub fn list_replay_requests_unassigned(&self) -> Result<Vec<ReplayRequest>, String> {
+        self.list_replay_requests("collection_id IS NULL", [])
+    }
+
+    pub fn get_replay_request(&self, request_id: i64) -> Result<Option<ReplayRequest>, String> {
+        self.list_replay_requests("id = ?1", [request_id])
+            .map(|mut list| list.pop())
+    }
+
+    pub fn update_replay_request_sort(
+        &self,
+        request_id: i64,
+        collection_id: Option<i64>,
+        sort_index: i64,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE replay_requests SET collection_id = ?1, sort_index = ?2, updated_at = ?3 WHERE id = ?4",
+                params![collection_id, sort_index, updated_at, request_id],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_replay_request_name(
+        &self,
+        request_id: i64,
+        name: &str,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE replay_requests SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                params![name, updated_at, request_id],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_replay_collection_sort(
+        &self,
+        collection_id: i64,
+        sort_index: i64,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE replay_collections SET sort_index = ?1 WHERE id = ?2",
+                params![sort_index, collection_id],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    pub fn create_replay_collection(&self, name: &str, sort_index: i64, created_at: &str) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO replay_collections (name, sort_index, created_at) VALUES (?1, ?2, ?3)",
+                params![name, sort_index, created_at],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn next_replay_collection_sort_index(&self) -> Result<i64, String> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(sort_index), 0) FROM replay_collections",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|err| err.to_string())
+            .map(|value| value + 1)
+    }
+
     pub fn add_tags(&self, request_id: i64, tags: &[&str]) -> Result<(), String> {
         for tag in tags {
             let tag_id = self.ensure_tag_id(tag)?;
@@ -507,6 +639,70 @@ impl SqliteStore {
 
     pub fn insert_replay_execution(&self, execution: &ReplayExecution) -> Result<i64, String> {
         self.insert_replay_execution_inner(execution)
+    }
+
+    pub fn next_replay_request_sort_index(
+        &self,
+        collection_id: Option<i64>,
+    ) -> Result<i64, String> {
+        let value = if let Some(id) = collection_id {
+            self.conn
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_index), 0) FROM replay_requests WHERE collection_id = ?1",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|err| err.to_string())?
+        } else {
+            self.conn
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_index), 0) FROM replay_requests WHERE collection_id IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|err| err.to_string())?
+        };
+        Ok(value + 1)
+    }
+
+    pub fn get_replay_active_version(
+        &self,
+        request_id: i64,
+    ) -> Result<Option<ReplayVersion>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT ver.id, ver.replay_request_id, ver.parent_id, ver.label, ver.created_at, ver.method, ver.scheme, ver.host, ver.port, ver.path, ver.query, ver.url, ver.http_version, ver.request_headers, ver.request_body, ver.request_body_size
+                 FROM replay_requests req
+                 JOIN replay_versions ver ON ver.id = req.active_version_id
+                 WHERE req.id = ?1",
+            )
+            .map_err(|err| err.to_string())?;
+        stmt.query_row([request_id], parse_replay_version_row)
+            .optional()
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn get_latest_replay_execution(
+        &self,
+        request_id: i64,
+    ) -> Result<Option<ReplayExecution>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, replay_request_id, timeline_request_id, executed_at FROM replay_executions WHERE replay_request_id = ?1 ORDER BY executed_at DESC LIMIT 1",
+            )
+            .map_err(|err| err.to_string())?;
+        stmt.query_row([request_id], |row| {
+            Ok(ReplayExecution {
+                id: row.get(0)?,
+                replay_request_id: row.get(1)?,
+                timeline_request_id: row.get(2)?,
+                executed_at: row.get(3)?,
+            })
+        })
+        .optional()
+        .map_err(|err| err.to_string())
     }
 
     pub fn query_request_summaries(
@@ -679,6 +875,26 @@ impl SqliteStore {
     }
 }
 
+impl SqliteStore {
+    fn list_replay_requests<P: rusqlite::Params>(
+        &self,
+        where_clause: &str,
+        params: P,
+    ) -> Result<Vec<ReplayRequest>, String> {
+        let sql = format!(
+            "SELECT id, collection_id, source_timeline_request_id, name, sort_index, method, scheme, host, port, path, query, url, http_version, request_headers, request_body, request_body_size, active_version_id, created_at, updated_at
+             FROM replay_requests WHERE {where_clause} ORDER BY sort_index DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(|err| err.to_string())?;
+        let mut rows = stmt.query(params).map_err(|err| err.to_string())?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+            results.push(parse_replay_request_row(row).map_err(|err| err.to_string())?);
+        }
+        Ok(results)
+    }
+}
+
 #[allow(dead_code)]
 impl From<TimelineRequestSummary> for TimelineRequest {
     fn from(summary: TimelineRequestSummary) -> Self {
@@ -746,6 +962,51 @@ pub fn parse_response_row(row: &Row<'_>) -> Result<TimelineResponse, rusqlite::E
         response_body_truncated: row.get::<_, i64>(6)? != 0,
         http_version: row.get(7)?,
         received_at: row.get(8)?,
+    })
+}
+
+fn parse_replay_request_row(row: &Row<'_>) -> Result<ReplayRequest, rusqlite::Error> {
+    Ok(ReplayRequest {
+        id: row.get(0)?,
+        collection_id: row.get(1)?,
+        source_timeline_request_id: row.get(2)?,
+        name: row.get(3)?,
+        sort_index: row.get(4)?,
+        method: row.get(5)?,
+        scheme: row.get(6)?,
+        host: row.get(7)?,
+        port: row.get::<_, i64>(8)? as u16,
+        path: row.get(9)?,
+        query: row.get(10)?,
+        url: row.get(11)?,
+        http_version: row.get(12)?,
+        request_headers: row.get(13)?,
+        request_body: row.get::<_, Option<Vec<u8>>>(14)?.unwrap_or_default(),
+        request_body_size: row.get::<_, i64>(15)? as usize,
+        active_version_id: row.get(16)?,
+        created_at: row.get(17)?,
+        updated_at: row.get(18)?,
+    })
+}
+
+fn parse_replay_version_row(row: &Row<'_>) -> Result<ReplayVersion, rusqlite::Error> {
+    Ok(ReplayVersion {
+        id: row.get(0)?,
+        replay_request_id: row.get(1)?,
+        parent_id: row.get(2)?,
+        label: row.get(3)?,
+        created_at: row.get(4)?,
+        method: row.get(5)?,
+        scheme: row.get(6)?,
+        host: row.get(7)?,
+        port: row.get::<_, i64>(8)? as u16,
+        path: row.get(9)?,
+        query: row.get(10)?,
+        url: row.get(11)?,
+        http_version: row.get(12)?,
+        request_headers: row.get(13)?,
+        request_body: row.get::<_, Option<Vec<u8>>>(14)?.unwrap_or_default(),
+        request_body_size: row.get::<_, i64>(15)? as usize,
     })
 }
 

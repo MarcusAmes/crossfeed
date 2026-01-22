@@ -35,7 +35,7 @@ pub fn response_preview_placeholder(
     message: &str,
     theme: ThemePalette,
 ) -> Element<'static, Message> {
-    let content = column![text_muted(message, 16, theme)];
+    let content = column![text_muted(message.to_string(), 16, theme)];
     pane_scroll(container(content).padding(12).into())
 }
 

@@ -65,10 +65,16 @@ impl TimelineState {
         })
     }
 
-    pub fn view(&self, focus: crate::app::FocusArea, theme: &ThemePalette) -> Element<'_, Message> {
+    pub fn view(
+        &self,
+        focus: crate::app::FocusArea,
+        theme: &ThemePalette,
+        on_context: Option<fn(i64) -> Message>,
+        on_move: Option<fn(iced::Point) -> Message>,
+    ) -> Element<'_, Message> {
         let grid = PaneGrid::new(&self.panes, |_, state, _| {
             let pane_content: Element<'_, Message> = match state {
-                PaneKind::Timeline => self.timeline_view(focus, *theme),
+                PaneKind::Timeline => self.timeline_view(focus, *theme, on_context, on_move),
                 PaneKind::Detail => self.detail_view(focus, *theme),
                 PaneKind::Response => self.response_view(focus, *theme),
             };
@@ -108,6 +114,8 @@ impl TimelineState {
         &self,
         _focus: crate::app::FocusArea,
         theme: ThemePalette,
+        on_context: Option<fn(i64) -> Message>,
+        on_move: Option<fn(iced::Point) -> Message>,
     ) -> Element<'_, Message> {
         timeline_request_list_view(
             &self.timeline,
@@ -115,6 +123,8 @@ impl TimelineState {
             &self.responses,
             self.selected,
             theme,
+            on_context,
+            on_move,
         )
     }
 

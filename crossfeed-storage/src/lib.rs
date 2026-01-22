@@ -19,7 +19,7 @@ pub use project::{
     ProxyProtocolMode, TimelineConfig,
 };
 pub use query::{TimelineQuery, TimelineSort};
-pub use replay::{ReplayExecution, ReplayRequest, ReplayVersion};
+pub use replay::{ReplayCollection, ReplayExecution, ReplayRequest, ReplayVersion};
 pub use schema::{SchemaCatalog, SchemaError, SchemaSpec, TableSpec};
 pub use sqlite::{FtsConfig, ResponseSummary, SqliteConfig, SqliteStore, TimelineRequestSummary};
 pub use timeline::{

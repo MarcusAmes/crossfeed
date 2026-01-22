@@ -1,11 +1,20 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayCollection {
+    pub id: i64,
+    pub name: String,
+    pub sort_index: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplayRequest {
     pub id: i64,
     pub collection_id: Option<i64>,
     pub source_timeline_request_id: Option<i64>,
     pub name: String,
+    pub sort_index: i64,
     pub method: String,
     pub scheme: String,
     pub host: String,

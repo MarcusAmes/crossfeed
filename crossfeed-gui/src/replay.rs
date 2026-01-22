@@ -1,12 +1,21 @@
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+
+use crossfeed_storage::{ReplayCollection, ReplayRequest, ReplayVersion, TimelineResponse};
+use iced::mouse;
 use iced::widget::{
-    PaneGrid, button, column, container, pane_grid, text, text_editor,
+    PaneGrid, button, column, container, mouse_area, pane_grid, text, text_editor,
 };
 use iced::{Element, Length, Theme};
+use iced::font::Weight;
 use iced::widget::text_editor::Content;
 use serde::{Deserialize, Serialize};
 
-use crate::app::Message;
-use crate::theme::{ThemePalette, pane_border_style, text_editor_style, text_muted, text_primary};
+use crate::app::{Message, ReplayDropTarget};
+use crate::theme::{
+    ThemePalette, pane_border_style, replay_collection_header_style, replay_row_style,
+    text_editor_style, text_muted, text_primary,
+};
 use crate::ui::panes::{
     pane_scroll, pane_text_editor, response_preview_from_bytes, response_preview_placeholder,
 };
@@ -14,8 +23,13 @@ use crate::ui::panes::{
 #[derive(Debug)]
 pub struct ReplayState {
     panes: pane_grid::State<ReplayPaneKind>,
-    requests: Vec<String>,
-    selected: Option<usize>,
+    store_path: Option<PathBuf>,
+    collections: Vec<ReplayCollection>,
+    requests_by_collection: HashMap<Option<i64>, Vec<ReplayRequest>>,
+    collapsed_collections: HashSet<i64>,
+    selected_request_id: Option<i64>,
+    latest_response: Option<TimelineResponse>,
+    active_version: Option<ReplayVersion>,
     editor_content: Content,
 }
 
@@ -23,12 +37,13 @@ impl Default for ReplayState {
     fn default() -> Self {
         let mut state = Self {
             panes: pane_grid::State::new(ReplayPaneKind::List).0,
-            requests: vec![
-                "Login flow".to_string(),
-                "Search results".to_string(),
-                "Checkout".to_string(),
-            ],
-            selected: Some(0),
+            store_path: None,
+            collections: Vec::new(),
+            requests_by_collection: HashMap::new(),
+            collapsed_collections: HashSet::new(),
+            selected_request_id: None,
+            latest_response: None,
+            active_version: None,
             editor_content: Content::with_text("GET /api/example\nHost: example.com\n\n"),
         };
         state.apply_layout(default_replay_layout());
@@ -78,20 +93,89 @@ impl ReplayState {
 
     pub(crate) fn request_list_view(&self, theme: ThemePalette) -> Element<'_, Message> {
         let mut list = column![].spacing(8);
-        for (index, request) in self.requests.iter().enumerate() {
-            let is_selected = self.selected == Some(index);
-            let label = if is_selected {
-                text_primary(request.clone(), 14, theme)
+        for collection in &self.collections {
+            let is_collapsed = self.collapsed_collections.contains(&collection.id);
+            let header_label = if is_collapsed {
+                format!("{} ▸", collection.name)
             } else {
-                text_muted(request.clone(), 14, theme)
+                format!("{} ▾", collection.name)
             };
-            let row = button(label)
-                .on_press(Message::ReplaySelect(index))
-                .padding([4, 8]);
-            list = list.push(row);
+            let header = button(
+                text(header_label)
+                    .size(13)
+                    .style({
+                        let theme = theme;
+                        move |_theme: &Theme| iced::widget::text::Style {
+                            color: Some(theme.text),
+                        }
+                    })
+                    .font(iced::Font {
+                        weight: Weight::Bold,
+                        ..iced::Font::default()
+                    }),
+            )
+                .on_press(Message::ReplayToggleCollection(collection.id))
+                .padding([4, 6])
+                .style({
+                    let theme = theme;
+                    let is_open = !is_collapsed;
+                    move |_theme, status| replay_collection_header_style(theme, status, is_open)
+                });
+            let header_area = mouse_area(header)
+                .on_enter(Message::ReplayDragHover(ReplayDropTarget::Collection {
+                    collection_id: Some(collection.id),
+                }))
+                .interaction(mouse::Interaction::Pointer);
+            list = list.push(header_area);
+
+            if !is_collapsed {
+                if let Some(requests) = self.requests_by_collection.get(&Some(collection.id)) {
+                    for request in requests {
+                        list = list.push(self.request_row(request, theme));
+                    }
+                }
+            }
         }
 
-        pane_scroll(list.into())
+        if let Some(requests) = self.requests_by_collection.get(&None) {
+            let header = button(
+                text("Uncategorized ▾")
+                    .size(13)
+                    .style({
+                        let theme = theme;
+                        move |_theme: &Theme| iced::widget::text::Style {
+                            color: Some(theme.text),
+                        }
+                    })
+                    .font(iced::Font {
+                        weight: Weight::Bold,
+                        ..iced::Font::default()
+                    }),
+            )
+                .on_press(Message::ReplayToggleCollection(-1))
+                .padding([4, 6])
+                .style({
+                    let theme = theme;
+                    move |_theme, status| replay_collection_header_style(theme, status, true)
+                });
+            let header_area = mouse_area(header)
+                .on_enter(Message::ReplayDragHover(ReplayDropTarget::Collection {
+                    collection_id: None,
+                }))
+                .interaction(mouse::Interaction::Pointer);
+            list = list.push(header_area);
+            for request in requests {
+                list = list.push(self.request_row(request, theme));
+            }
+        }
+
+        let content = pane_scroll(list.into());
+        mouse_area(content)
+            .on_move(Message::ReplayListCursor)
+            .on_release(Message::ReplayDragEnd)
+            .on_exit(Message::ReplayDragHoverClear)
+            .interaction(mouse::Interaction::Pointer)
+            .into()
     }
 
     pub(crate) fn request_editor_view(&self, theme: ThemePalette) -> Element<'_, Message> {
@@ -109,33 +193,122 @@ impl ReplayState {
     }
 
     fn response_view(&self, theme: ThemePalette) -> Element<'_, Message> {
-        if self.selected.is_none() {
-            return response_preview_placeholder("Select a replay to preview response", theme);
-        }
-        let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
-        let body = b"Replay response preview";
+        let response = match &self.latest_response {
+            Some(response) => response,
+            None => {
+                return response_preview_placeholder("No replay execution yet", theme);
+            }
+        };
+        let status_line = response
+            .reason
+            .clone()
+            .map(|reason| format!("{} {reason}", response.status_code))
+            .unwrap_or_else(|| response.status_code.to_string());
         response_preview_from_bytes(
-            "200 OK".to_string(),
-            headers,
-            body,
-            false,
+            status_line,
+            &response.response_headers,
+            &response.response_body,
+            response.response_body_truncated,
             theme,
         )
     }
 
-    pub fn select(&mut self, index: usize) {
-        self.selected = Some(index);
-        if let Some(label) = self.requests.get(index) {
-            let body = format!(
-                "GET /replay/{}\nHost: example.com\n\n",
-                label.to_lowercase().replace(' ', "-")
-            );
-            self.editor_content = Content::with_text(&body);
-        }
+    pub fn select(&mut self, request_id: i64) {
+        self.selected_request_id = Some(request_id);
     }
 
     pub fn apply_editor_action(&mut self, action: text_editor::Action) {
         self.editor_content.perform(action);
+    }
+
+    pub fn set_store_path(&mut self, path: PathBuf) {
+        self.store_path = Some(path);
+    }
+
+    pub fn store_path(&self) -> Option<&PathBuf> {
+        self.store_path.as_ref()
+    }
+
+    pub fn set_replay_data(
+        &mut self,
+        collections: Vec<ReplayCollection>,
+        requests_by_collection: HashMap<Option<i64>, Vec<ReplayRequest>>,
+    ) {
+        self.collections = collections;
+        self.requests_by_collection = requests_by_collection;
+    }
+
+    pub fn collections(&self) -> &[ReplayCollection] {
+        &self.collections
+    }
+
+    pub fn requests_in_collection(&self, collection_id: Option<i64>) -> Option<&Vec<ReplayRequest>> {
+        self.requests_by_collection.get(&collection_id)
+    }
+
+    pub fn toggle_collection(&mut self, collection_id: i64) {
+        if collection_id == -1 {
+            return;
+        }
+        if self.collapsed_collections.contains(&collection_id) {
+            self.collapsed_collections.remove(&collection_id);
+        } else {
+            self.collapsed_collections.insert(collection_id);
+        }
+    }
+
+    pub fn set_active_version(&mut self, version: Option<ReplayVersion>) {
+        self.active_version = version.clone();
+        if let Some(version) = version {
+            let headers = String::from_utf8_lossy(&version.request_headers)
+                .replace("\r\n", "\n")
+                .trim_end()
+                .to_string();
+            let body = String::from_utf8_lossy(&version.request_body).to_string();
+            let combined = if body.is_empty() {
+                headers
+            } else if headers.is_empty() {
+                body
+            } else {
+                format!("{headers}\n\n{body}")
+            };
+            self.editor_content = Content::with_text(&combined);
+        }
+    }
+
+    pub fn set_latest_response(&mut self, response: Option<TimelineResponse>) {
+        self.latest_response = response;
+    }
+
+    pub fn request_row(&self, request: &ReplayRequest, theme: ThemePalette) -> Element<'_, Message> {
+        let is_selected = self.selected_request_id == Some(request.id);
+        let label = if is_selected {
+            text_primary(request.name.clone(), 14, theme)
+        } else {
+            text_muted(request.name.clone(), 14, theme)
+        };
+        let row = button(label)
+            .padding([4, 8])
+            .width(Length::Fill)
+            .style(move |_theme, status| replay_row_style(theme, status, is_selected));
+        mouse_area(row)
+            .on_press(Message::ReplayDragStart(request.id, request.collection_id))
+            .on_right_press(Message::ReplayContextMenuOpen(request.id))
+            .on_enter(Message::ReplayDragHover(ReplayDropTarget::Request {
+                request_id: request.id,
+                collection_id: request.collection_id,
+            }))
+            .interaction(mouse::Interaction::Pointer)
+            .into()
+    }
+
+    pub fn request_name(&self, request_id: i64) -> Option<String> {
+        for requests in self.requests_by_collection.values() {
+            if let Some(request) = requests.iter().find(|request| request.id == request_id) {
+                return Some(request.name.clone());
+            }
+        }
+        None
     }
 
     pub fn snapshot_layout(&self) -> ReplayLayout {

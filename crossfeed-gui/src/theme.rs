@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use std::borrow::Cow;
+
 use iced::widget::text_input;
 use iced::{Background, Color, Theme};
 use serde::{Deserialize, Serialize};
@@ -233,11 +235,11 @@ pub fn pane_border_style(theme: ThemePalette) -> iced::widget::container::Style 
     }
 }
 
-pub fn text_primary(
-    value: impl Into<String>,
+pub fn text_primary<'a>(
+    value: impl Into<Cow<'a, str>>,
     size: u16,
     theme: ThemePalette,
-) -> iced::widget::Text<'static> {
+) -> iced::widget::Text<'a> {
     iced::widget::text(value.into())
         .size(size)
         .style(move |_theme: &Theme| iced::widget::text::Style {
@@ -245,11 +247,11 @@ pub fn text_primary(
         })
 }
 
-pub fn text_muted(
-    value: impl Into<String>,
+pub fn text_muted<'a>(
+    value: impl Into<Cow<'a, str>>,
     size: u16,
     theme: ThemePalette,
-) -> iced::widget::Text<'static> {
+) -> iced::widget::Text<'a> {
     iced::widget::text(value.into())
         .size(size)
         .style(move |_theme: &Theme| iced::widget::text::Style {
@@ -257,11 +259,11 @@ pub fn text_muted(
         })
 }
 
-pub fn text_danger(
-    value: impl Into<String>,
+pub fn text_danger<'a>(
+    value: impl Into<Cow<'a, str>>,
     size: u16,
     theme: ThemePalette,
-) -> iced::widget::Text<'static> {
+) -> iced::widget::Text<'a> {
     iced::widget::text(value.into())
         .size(size)
         .style(move |_theme: &Theme| iced::widget::text::Style {
@@ -295,7 +297,7 @@ pub fn action_button<Message: Clone + 'static>(
     message: Message,
     theme: ThemePalette,
 ) -> iced::widget::Button<'static, Message> {
-    iced::widget::button(text_primary(label, 12, theme))
+    iced::widget::button(text_primary(label.to_string(), 12, theme))
         .on_press(message)
         .style(move |_theme, status| action_button_style(theme, status))
 }
@@ -306,6 +308,52 @@ pub fn timeline_row_style(
     selected: bool,
 ) -> iced::widget::button::Style {
     let base = if selected { theme.header } else { theme.surface };
+    let background = match status {
+        iced::widget::button::Status::Hovered => theme.header,
+        iced::widget::button::Status::Pressed => theme.accent,
+        _ => base,
+    };
+    iced::widget::button::Style {
+        text_color: theme.text,
+        background: Some(Background::Color(background)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+pub fn replay_row_style(
+    theme: ThemePalette,
+    status: iced::widget::button::Status,
+    selected: bool,
+) -> iced::widget::button::Style {
+    let base = if selected { theme.header } else { theme.surface };
+    let background = match status {
+        iced::widget::button::Status::Hovered => theme.header,
+        iced::widget::button::Status::Pressed => theme.accent,
+        _ => base,
+    };
+    iced::widget::button::Style {
+        text_color: theme.text,
+        background: Some(Background::Color(background)),
+        border: iced::border::Border {
+            color: theme.border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+pub fn replay_collection_header_style(
+    theme: ThemePalette,
+    status: iced::widget::button::Status,
+    is_open: bool,
+) -> iced::widget::button::Style {
+    let base = if is_open { theme.accent } else { theme.surface };
     let background = match status {
         iced::widget::button::Status::Hovered => theme.header,
         iced::widget::button::Status::Pressed => theme.accent,

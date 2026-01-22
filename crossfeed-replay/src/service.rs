@@ -33,6 +33,7 @@ impl ReplayService {
             collection_id: None,
             source_timeline_request_id: None,
             name,
+            sort_index: 0,
             method: timeline.method.clone(),
             scheme: timeline.scheme.clone(),
             host: timeline.host.clone(),

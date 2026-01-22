@@ -112,10 +112,14 @@ impl SchemaCatalog {
                     create_sql: "CREATE TABLE IF NOT EXISTS replay_collections (\
     id INTEGER PRIMARY KEY,\
     name TEXT NOT NULL,\
+    sort_index INTEGER NOT NULL DEFAULT 0,\
     created_at TEXT NOT NULL\
 )"
                     .to_string(),
-                    indices: vec![],
+                    indices: vec![
+                        "CREATE INDEX idx_replay_collections_sort_index ON replay_collections(sort_index)"
+                            .to_string(),
+                    ],
                 },
                 TableSpec {
                     name: "replay_requests".to_string(),
@@ -124,6 +128,7 @@ impl SchemaCatalog {
     collection_id INTEGER REFERENCES replay_collections(id),\
     source_timeline_request_id INTEGER REFERENCES timeline_requests(id),\
     name TEXT NOT NULL,\
+    sort_index INTEGER NOT NULL DEFAULT 0,\
     method TEXT NOT NULL,\
     scheme TEXT NOT NULL,\
     host TEXT NOT NULL,\
@@ -142,6 +147,8 @@ impl SchemaCatalog {
                     .to_string(),
                     indices: vec![
                         "CREATE INDEX idx_replay_requests_collection_id ON replay_requests(collection_id)"
+                            .to_string(),
+                        "CREATE INDEX idx_replay_requests_collection_sort ON replay_requests(collection_id, sort_index)"
                             .to_string(),
                         "CREATE INDEX idx_replay_requests_source_timeline_request_id ON replay_requests(source_timeline_request_id)"
                             .to_string(),
