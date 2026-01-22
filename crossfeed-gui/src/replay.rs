@@ -70,7 +70,7 @@ impl ReplayState {
             .into()
     }
 
-    fn request_list_view(&self, theme: ThemePalette) -> Element<'_, Message> {
+    pub(crate) fn request_list_view(&self, theme: ThemePalette) -> Element<'_, Message> {
         let mut list = column![].spacing(8);
         for (index, request) in self.requests.iter().enumerate() {
             let is_selected = self.selected == Some(index);
@@ -88,7 +88,7 @@ impl ReplayState {
         scrollable(list).into()
     }
 
-    fn request_editor_view(&self, theme: ThemePalette) -> Element<'_, Message> {
+    pub(crate) fn request_editor_view(&self, theme: ThemePalette) -> Element<'_, Message> {
         let editor = text_input("Request details", &self.request_body)
             .on_input(Message::ReplayUpdateDetails)
             .padding(8)

@@ -4,12 +4,14 @@ use crossfeed_ingest::{
     ProjectContext, ProxyRuntimeConfig, TailCursor, TailUpdate,
     open_or_create_project, start_proxy, tail_query,
 };
-use crossfeed_storage::{ProjectConfig, ProjectPaths};
+use crossfeed_storage::{ProjectConfig, ProjectPaths, SqliteStore};
+use std::collections::HashMap;
+
 use iced::event;
 use iced::mouse;
 use iced::keyboard::{self, Key, Modifiers};
 use iced::widget::{
-    Space, column, container, mouse_area, pane_grid, row, stack, text, text_input,
+    PaneGrid, Space, column, container, mouse_area, pane_grid, row, stack, text, text_input,
 };
 use iced::{Alignment, Element, Length, Point, Subscription, Task, Theme};
 use serde::{Deserialize, Serialize};
@@ -23,10 +25,14 @@ use crate::project_settings::ProjectSettingsState;
 use crate::replay::{ReplayLayout, ReplayState, default_replay_layout};
 use crate::theme::{
     ThemeConfig, ThemePalette, action_button, background_style, load_theme_config, menu_bar_style,
-    menu_item_button_style, menu_panel_style, tab_button_style, text_danger, text_input_style,
-    text_muted, text_primary, theme_config_path,
+    menu_item_button_style, menu_panel_style, pane_border_style, tab_button_style, text_danger,
+    text_input_style, text_muted, text_primary, theme_config_path,
 };
 use crate::timeline::{PaneLayout, TimelineState};
+use crate::ui::panes::{
+    PaneModuleKind, response_preview_from_bytes, response_preview_placeholder,
+    timeline_request_details_view, timeline_request_list_view,
+};
 use crate::timeline::default_pane_layout;
 
 pub const APP_NAME: &str = "Crossfeed";
@@ -94,6 +100,13 @@ pub enum Message {
     ViewSubmenuBridgeHover(bool),
     ViewTabsRegionExit,
     CloseMenu,
+    AddPaneToTab(PaneModuleKind),
+    ViewPanesHover(bool),
+    ViewPanesSubmenuHover(bool),
+    ViewPanesBridgeHover(bool),
+    ViewPanesRegionExit,
+    CustomPaneDragged(pane_grid::DragEvent),
+    CustomPaneResized(pane_grid::ResizeEvent),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +171,11 @@ pub struct AppState {
     pub view_tabs_hover: bool,
     pub view_submenu_hover: bool,
     pub view_submenu_bridge_hover: bool,
+    pub view_panes_open: bool,
+    pub view_panes_hover: bool,
+    pub view_panes_submenu_hover: bool,
+    pub view_panes_bridge_hover: bool,
+    pub custom_tabs: HashMap<String, pane_grid::State<PaneModuleKind>>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +220,11 @@ impl AppState {
             view_tabs_hover: false,
             view_submenu_hover: false,
             view_submenu_bridge_hover: false,
+            view_panes_open: false,
+            view_panes_hover: false,
+            view_panes_submenu_hover: false,
+            view_panes_bridge_hover: false,
+            custom_tabs: HashMap::new(),
         };
         state.ensure_tabs();
         (state, Task::batch([config_task, theme_task]))
@@ -396,6 +419,10 @@ impl AppState {
                     self.view_tabs_hover = false;
                     self.view_submenu_hover = false;
                     self.view_submenu_bridge_hover = false;
+                    self.view_panes_open = false;
+                    self.view_panes_hover = false;
+                    self.view_panes_submenu_hover = false;
+                    self.view_panes_bridge_hover = false;
                 } else {
                     self.active_menu = Some(menu);
                     if menu != MenuKind::View {
@@ -403,6 +430,10 @@ impl AppState {
                         self.view_tabs_hover = false;
                         self.view_submenu_hover = false;
                         self.view_submenu_bridge_hover = false;
+                        self.view_panes_open = false;
+                        self.view_panes_hover = false;
+                        self.view_panes_submenu_hover = false;
+                        self.view_panes_bridge_hover = false;
                     }
                 }
                 Task::none()
@@ -413,6 +444,10 @@ impl AppState {
                 self.view_tabs_hover = false;
                 self.view_submenu_hover = false;
                 self.view_submenu_bridge_hover = false;
+                self.view_panes_open = false;
+                self.view_panes_hover = false;
+                self.view_panes_submenu_hover = false;
+                self.view_panes_bridge_hover = false;
                 Task::none()
             }
             Message::OpenNewTabPrompt => {
@@ -421,6 +456,10 @@ impl AppState {
                 self.view_tabs_hover = false;
                 self.view_submenu_hover = false;
                 self.view_submenu_bridge_hover = false;
+                self.view_panes_open = false;
+                self.view_panes_hover = false;
+                self.view_panes_submenu_hover = false;
+                self.view_panes_bridge_hover = false;
                 self.tab_context_menu = None;
                 self.tab_prompt_label.clear();
                 self.tab_prompt_mode = Some(TabPromptMode::New);
@@ -439,6 +478,10 @@ impl AppState {
                 self.view_tabs_hover = false;
                 self.view_submenu_hover = false;
                 self.view_submenu_bridge_hover = false;
+                self.view_panes_open = false;
+                self.view_panes_hover = false;
+                self.view_panes_submenu_hover = false;
+                self.view_panes_bridge_hover = false;
                 self.tab_context_menu = None;
                 self.tab_prompt_label = self
                     .config
@@ -464,6 +507,10 @@ impl AppState {
                 self.view_tabs_hover = false;
                 self.view_submenu_hover = false;
                 self.view_submenu_bridge_hover = false;
+                self.view_panes_open = false;
+                self.view_panes_hover = false;
+                self.view_panes_submenu_hover = false;
+                self.view_panes_bridge_hover = false;
                 self.save_tabs_and_layouts()
             }
             Message::AddDefaultTab(kind) => {
@@ -472,6 +519,10 @@ impl AppState {
                 self.view_tabs_hover = false;
                 self.view_submenu_hover = false;
                 self.view_submenu_bridge_hover = false;
+                self.view_panes_open = false;
+                self.view_panes_hover = false;
+                self.view_panes_submenu_hover = false;
+                self.view_panes_bridge_hover = false;
                 self.add_default_tab(kind)
             }
             Message::OpenTabContextMenu(tab_id) => {
@@ -545,6 +596,81 @@ impl AppState {
                 self.view_submenu_bridge_hover = false;
                 Task::none()
             }
+            Message::AddPaneToTab(kind) => {
+                self.active_menu = None;
+                self.view_panes_open = false;
+                self.view_panes_hover = false;
+                self.view_panes_submenu_hover = false;
+                self.view_panes_bridge_hover = false;
+                self.add_pane_to_active_tab(kind);
+                Task::none()
+            }
+            Message::ViewPanesHover(hovered) => {
+                self.view_panes_hover = hovered;
+                if hovered {
+                    self.view_panes_open = true;
+                }
+                Task::none()
+            }
+            Message::ViewPanesSubmenuHover(hovered) => {
+                self.view_panes_submenu_hover = hovered;
+                if hovered {
+                    self.view_panes_open = true;
+                }
+                Task::none()
+            }
+            Message::ViewPanesBridgeHover(hovered) => {
+                self.view_panes_bridge_hover = hovered;
+                if hovered {
+                    self.view_panes_open = true;
+                }
+                Task::none()
+            }
+            Message::ViewPanesRegionExit => {
+                self.view_panes_open = false;
+                self.view_panes_hover = false;
+                self.view_panes_submenu_hover = false;
+                self.view_panes_bridge_hover = false;
+                Task::none()
+            }
+            Message::CustomPaneDragged(event) => {
+                let layout = if let Some(tab_id) = self.config.active_tab_id.clone() {
+                    if let Some(state) = self.custom_tabs.get_mut(&tab_id) {
+                        match event {
+                            pane_grid::DragEvent::Dropped { pane, target } => {
+                                state.drop(pane, target);
+                            }
+                            pane_grid::DragEvent::Picked { .. } => {}
+                            pane_grid::DragEvent::Canceled { .. } => {}
+                        }
+                        Some(CustomLayout::from(state))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(layout) = layout {
+                    self.set_active_tab_layout(TabLayout::Custom(layout));
+                }
+                Task::none()
+            }
+            Message::CustomPaneResized(event) => {
+                let layout = if let Some(tab_id) = self.config.active_tab_id.clone() {
+                    if let Some(state) = self.custom_tabs.get_mut(&tab_id) {
+                        state.resize(event.split, event.ratio);
+                        Some(CustomLayout::from(state))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(layout) = layout {
+                    self.set_active_tab_layout(TabLayout::Custom(layout));
+                }
+                Task::none()
+            }
             Message::KeyPressed(key, modifiers) => self.handle_key(key, modifiers),
         }
     }
@@ -583,6 +709,13 @@ impl AppState {
                 _ => None,
             },
             Some(TabKind::Replay) => Some(TabLayout::Replay(self.replay_state.snapshot_layout())),
+            Some(TabKind::Custom) => {
+                let tab_id = self.config.active_tab_id.clone();
+                tab_id
+                    .as_ref()
+                    .and_then(|id| self.custom_tabs.get(id))
+                    .map(|state| TabLayout::Custom(CustomLayout::from(state)))
+            }
             _ => None,
         };
         if let (Some(layout), Some(tab)) = (layout, self.active_tab_mut()) {
@@ -676,6 +809,10 @@ impl AppState {
                     self.view_tabs_hover = false;
                     self.view_submenu_hover = false;
                     self.view_submenu_bridge_hover = false;
+                    self.view_panes_open = false;
+                    self.view_panes_hover = false;
+                    self.view_panes_submenu_hover = false;
+                    self.view_panes_bridge_hover = false;
                     return Task::none();
                 }
                 if matches!(self.focus, FocusArea::Detail | FocusArea::Response) {
@@ -720,9 +857,23 @@ impl AppState {
         match &self.screen {
             Screen::ProjectPicker(picker) => picker.view(&self.theme),
             Screen::Timeline(state) => {
-                let content = match self.active_tab_kind() {
-                    Some(TabKind::Timeline) | None => state.view(self.focus, &self.theme),
-                    Some(TabKind::Replay) => self.replay_state.view(&self.theme),
+                let active_tab = self.active_tab().cloned();
+                let content = match active_tab.as_ref().map(|tab| tab.kind) {
+                    Some(TabKind::Timeline) | None => {
+                        if matches!(active_tab.as_ref().and_then(|tab| tab.layout.as_ref()), Some(TabLayout::Custom(_))) {
+                            self.custom_tab_view(TabKind::Timeline, &self.theme)
+                        } else {
+                            state.view(self.focus, &self.theme)
+                        }
+                    }
+                    Some(TabKind::Replay) => {
+                        if matches!(active_tab.as_ref().and_then(|tab| tab.layout.as_ref()), Some(TabLayout::Custom(_))) {
+                            self.custom_tab_view(TabKind::Replay, &self.theme)
+                        } else {
+                            self.replay_state.view(&self.theme)
+                        }
+                    }
+                    Some(TabKind::Custom) => self.custom_tab_view(TabKind::Custom, &self.theme),
                     Some(kind) => self.placeholder_view(kind),
                 };
                 self.wrap_with_menu(content)
@@ -874,6 +1025,7 @@ impl AppState {
 
     fn view_menu_panel<'a>(&'a self) -> Element<'a, Message> {
         let tabs_hover = self.view_tabs_open;
+        let panes_hover = self.view_panes_open;
         let save_button = iced::widget::button(text("Save Tabs & Layouts").size(12).color(self.theme.text))
             .on_press(Message::SaveTabsAndLayouts)
             .padding([4, 10])
@@ -900,7 +1052,25 @@ impl AppState {
             .on_exit(Message::ViewTabsHover(false))
             .interaction(mouse::Interaction::Pointer);
 
-        let panel = container(column![save_button, tabs_area].spacing(6))
+        let panes_label = row![
+            text("Panes").size(12).color(self.theme.text),
+            Space::new(Length::Fill, Length::Shrink),
+            text("▶").size(10).color(self.theme.muted_text),
+        ]
+        .align_y(Alignment::Center);
+        let panes_button = iced::widget::button(panes_label)
+            .padding([4, 10])
+            .width(Length::Fill)
+            .style({
+                let theme = self.theme;
+                move |_theme, status| menu_item_button_style(theme, status, true)
+            });
+        let panes_area = mouse_area(panes_button)
+            .on_enter(Message::ViewPanesHover(true))
+            .on_exit(Message::ViewPanesHover(false))
+            .interaction(mouse::Interaction::Pointer);
+
+        let panel = container(column![save_button, tabs_area, panes_area].spacing(6))
             .padding(8)
             .width(Length::Fixed(200.0))
             .style({
@@ -908,56 +1078,111 @@ impl AppState {
                 move |_| menu_panel_style(theme)
             });
 
-        if !tabs_hover {
-            return panel.into();
+        let mut region: Element<'a, Message> = panel.into();
+
+        if tabs_hover {
+            let submenu = menu_panel(
+                vec![
+                    MenuItem {
+                        label: "Add Timeline Tab",
+                        message: Some(Message::AddDefaultTab(TabKind::Timeline)),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                    MenuItem {
+                        label: "Add Replay Tab",
+                        message: Some(Message::AddDefaultTab(TabKind::Replay)),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                    MenuItem {
+                        label: "Add Fuzzer Tab",
+                        message: Some(Message::AddDefaultTab(TabKind::Fuzzer)),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                    MenuItem {
+                        label: "Add Codec Tab",
+                        message: Some(Message::AddDefaultTab(TabKind::Codec)),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                ],
+                &self.theme,
+            );
+            let submenu = mouse_area(submenu)
+                .on_enter(Message::ViewSubmenuHover(true))
+                .on_exit(Message::ViewSubmenuHover(false))
+                .interaction(mouse::Interaction::Pointer);
+
+            let tabs_region = submenu_with_bridge(
+                region,
+                submenu.into(),
+                VIEW_SUBMENU_GAP,
+                Message::ViewSubmenuBridgeHover(true),
+                Message::ViewSubmenuBridgeHover(false),
+            );
+            region = mouse_area(tabs_region)
+                .on_exit(Message::ViewTabsRegionExit)
+                .interaction(mouse::Interaction::Pointer)
+                .into();
         }
 
-        let submenu = menu_panel(
-            vec![
-                MenuItem {
-                    label: "Add Timeline Tab",
-                    message: Some(Message::AddDefaultTab(TabKind::Timeline)),
-                    enabled: true,
-                    tooltip: None,
-                },
-                MenuItem {
-                    label: "Add Replay Tab",
-                    message: Some(Message::AddDefaultTab(TabKind::Replay)),
-                    enabled: true,
-                    tooltip: None,
-                },
-                MenuItem {
-                    label: "Add Fuzzer Tab",
-                    message: Some(Message::AddDefaultTab(TabKind::Fuzzer)),
-                    enabled: true,
-                    tooltip: None,
-                },
-                MenuItem {
-                    label: "Add Codec Tab",
-                    message: Some(Message::AddDefaultTab(TabKind::Codec)),
-                    enabled: true,
-                    tooltip: None,
-                },
-            ],
-            &self.theme,
-        );
-        let submenu = mouse_area(submenu)
-            .on_enter(Message::ViewSubmenuHover(true))
-            .on_exit(Message::ViewSubmenuHover(false))
-            .interaction(mouse::Interaction::Pointer);
+        if panes_hover {
+            let panes_menu = menu_panel(
+                vec![
+                    MenuItem {
+                        label: "Request List",
+                        message: Some(Message::AddPaneToTab(PaneModuleKind::RequestList)),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                    MenuItem {
+                        label: "Request Details",
+                        message: Some(Message::AddPaneToTab(PaneModuleKind::RequestDetails)),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                    MenuItem {
+                        label: "Response Preview",
+                        message: Some(Message::AddPaneToTab(PaneModuleKind::ResponsePreview)),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                    MenuItem {
+                        label: "Replay List",
+                        message: Some(Message::AddPaneToTab(PaneModuleKind::ReplayList)),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                    MenuItem {
+                        label: "Replay Editor",
+                        message: Some(Message::AddPaneToTab(PaneModuleKind::ReplayEditor)),
+                        enabled: true,
+                        tooltip: None,
+                    },
+                ],
+                &self.theme,
+            );
+            let panes_menu = mouse_area(panes_menu)
+                .on_enter(Message::ViewPanesSubmenuHover(true))
+                .on_exit(Message::ViewPanesSubmenuHover(false))
+                .interaction(mouse::Interaction::Pointer);
 
-        let region = submenu_with_bridge(
-            panel.into(),
-            submenu.into(),
-            VIEW_SUBMENU_GAP,
-            Message::ViewSubmenuBridgeHover(true),
-            Message::ViewSubmenuBridgeHover(false),
-        );
+            let panes_region = submenu_with_bridge(
+                region,
+                panes_menu.into(),
+                VIEW_SUBMENU_GAP,
+                Message::ViewPanesBridgeHover(true),
+                Message::ViewPanesBridgeHover(false),
+            );
+            region = mouse_area(panes_region)
+                .on_exit(Message::ViewPanesRegionExit)
+                .interaction(mouse::Interaction::Pointer)
+                .into();
+        }
 
-        mouse_area(region)
-            .on_exit(Message::ViewTabsRegionExit)
-            .interaction(mouse::Interaction::Pointer)
-            .into()
+        region
     }
 
     fn tabs_view<'a>(&'a self) -> Element<'a, Message> {
@@ -1145,19 +1370,26 @@ impl AppState {
         match tab.kind {
             TabKind::Timeline => {
                 if let Screen::Timeline(state) = &mut self.screen {
-                    let layout = match tab.layout {
-                        Some(TabLayout::Timeline(layout)) => layout,
-                        _ => default_pane_layout(),
-                    };
-                    state.apply_layout(layout);
+                    match tab.layout {
+                        Some(TabLayout::Custom(_)) => {
+                            self.ensure_custom_state(&tab);
+                        }
+                        Some(TabLayout::Timeline(layout)) => state.apply_layout(layout),
+                        _ => state.apply_layout(default_pane_layout()),
+                    }
                 }
             }
             TabKind::Replay => {
-                let layout = match tab.layout {
-                    Some(TabLayout::Replay(layout)) => layout,
-                    _ => default_replay_layout(),
-                };
-                self.replay_state.apply_layout(layout);
+                match tab.layout {
+                    Some(TabLayout::Custom(_)) => {
+                        self.ensure_custom_state(&tab);
+                    }
+                    Some(TabLayout::Replay(layout)) => self.replay_state.apply_layout(layout),
+                    _ => self.replay_state.apply_layout(default_replay_layout()),
+                }
+            }
+            TabKind::Custom => {
+                self.ensure_custom_state(&tab);
             }
             _ => {}
         }
@@ -1169,6 +1401,16 @@ impl AppState {
         }
     }
 
+    fn ensure_custom_state(&mut self, tab: &TabConfig) {
+        let layout = match tab.layout.clone() {
+            Some(TabLayout::Custom(layout)) => layout,
+            _ => default_custom_layout(),
+        };
+        self.custom_tabs
+            .entry(tab.id.clone())
+            .or_insert_with(|| pane_grid::State::with_configuration(layout.to_configuration()));
+    }
+
     fn placeholder_view(&self, kind: TabKind) -> Element<'_, Message> {
         let label = match kind {
             TabKind::Replay => "Replay tab (empty)",
@@ -1178,6 +1420,146 @@ impl AppState {
             TabKind::Timeline => "Timeline",
         };
         container(column![text_muted(label, 16, self.theme)])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .into()
+    }
+
+    fn custom_tab_view(&self, context: TabKind, theme: &ThemePalette) -> Element<'_, Message> {
+        let Some(tab_id) = self.config.active_tab_id.as_ref() else {
+            return self.placeholder_view(TabKind::Custom);
+        };
+        let Some(state) = self.custom_tabs.get(tab_id) else {
+            return self.placeholder_view(TabKind::Custom);
+        };
+
+        let grid = PaneGrid::new(state, |_, pane_kind, _| {
+            let pane_content = self.render_custom_pane(*pane_kind, context, *theme);
+            let content = container(pane_content).style({
+                let theme = *theme;
+                move |_| pane_border_style(theme)
+            });
+            let title_text = text(pane_kind.title()).size(13).style({
+                let theme = *theme;
+                move |_theme: &Theme| iced::widget::text::Style {
+                    color: Some(theme.text),
+                }
+            });
+            pane_grid::Content::new(content).title_bar(
+                pane_grid::TitleBar::new(title_text)
+                    .padding(6)
+                    .style({
+                        let theme = *theme;
+                        move |_| crate::theme::menu_bar_style(theme)
+                    }),
+            )
+        })
+        .on_drag(Message::CustomPaneDragged)
+        .on_resize(10, Message::CustomPaneResized);
+
+        container(grid)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn render_custom_pane(
+        &self,
+        pane_kind: PaneModuleKind,
+        context: TabKind,
+        theme: ThemePalette,
+    ) -> Element<'_, Message> {
+        match pane_kind {
+            PaneModuleKind::RequestList => match context {
+                TabKind::Timeline => {
+                    if let Screen::Timeline(state) = &self.screen {
+                        timeline_request_list_view(
+                            &state.timeline,
+                            &state.tags,
+                            &state.responses,
+                            state.selected,
+                            theme,
+                        )
+                    } else {
+                        self.pane_placeholder("No timeline data", theme)
+                    }
+                }
+                TabKind::Replay => self.replay_state.request_list_view(theme),
+                _ => self.pane_placeholder("Request list", theme),
+            },
+            PaneModuleKind::RequestDetails => match context {
+                TabKind::Timeline => {
+                    if let Screen::Timeline(state) = &self.screen {
+                        let selected = state.selected.and_then(|idx| state.timeline.get(idx));
+                        let response = selected.and_then(|item| state.responses.get(&item.id));
+                        timeline_request_details_view(selected, response, theme)
+                    } else {
+                        self.pane_placeholder("No timeline data", theme)
+                    }
+                }
+                _ => self.pane_placeholder("Request details", theme),
+            },
+            PaneModuleKind::ResponsePreview => match context {
+                TabKind::Timeline => {
+                    if let Screen::Timeline(state) = &self.screen {
+                        if let Some(selected) = state.selected.and_then(|idx| state.timeline.get(idx)) {
+                            let response = state.responses.get(&selected.id);
+                            if let Some(response) = response {
+                                let timeline_response = SqliteStore::open(&state.store_path)
+                                    .ok()
+                                    .and_then(|store| store.get_response_by_request_id(selected.id).ok())
+                                    .and_then(|opt| opt);
+                                let response_headers = timeline_response
+                                    .as_ref()
+                                    .map(|resp| resp.response_headers.as_slice())
+                                    .unwrap_or(&[]);
+                                let body = timeline_response
+                                    .as_ref()
+                                    .map(|resp| resp.response_body.as_slice())
+                                    .unwrap_or(&[]);
+                                let status_line = response
+                                    .reason
+                                    .clone()
+                                    .map(|reason| format!("{} {reason}", response.status_code))
+                                    .unwrap_or_else(|| response.status_code.to_string());
+                                let truncated = timeline_response
+                                    .as_ref()
+                                    .map(|resp| resp.response_body_truncated)
+                                    .unwrap_or(false);
+                                return response_preview_from_bytes(
+                                    status_line,
+                                    response_headers,
+                                    body,
+                                    truncated,
+                                    theme,
+                                );
+                            }
+                        }
+                        response_preview_placeholder("No response recorded yet", theme)
+                    } else {
+                        response_preview_placeholder("No timeline data", theme)
+                    }
+                }
+                TabKind::Replay => {
+                    response_preview_placeholder("Replay response preview", theme)
+                }
+                _ => response_preview_placeholder("Response preview", theme),
+            },
+            PaneModuleKind::ReplayList => match context {
+                TabKind::Replay => self.replay_state.request_list_view(theme),
+                _ => self.pane_placeholder("Replay list", theme),
+            },
+            PaneModuleKind::ReplayEditor => match context {
+                TabKind::Replay => self.replay_state.request_editor_view(theme),
+                _ => self.pane_placeholder("Replay editor", theme),
+            },
+        }
+    }
+
+    fn pane_placeholder(&self, label: &str, theme: ThemePalette) -> Element<'_, Message> {
+        container(column![text_muted(label, 16, theme)])
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Alignment::Center)
@@ -1244,9 +1626,9 @@ impl AppState {
                     id: id.clone(),
                     label: label.to_string(),
                     kind: TabKind::Custom,
-                    layout: None,
+                    layout: Some(TabLayout::Custom(default_custom_layout())),
                 });
-                self.config.active_tab_id = Some(id);
+                self.set_active_tab(id);
             }
             TabPromptMode::Rename(tab_id) => {
                 if let Some(tab) = self.config.tabs.iter_mut().find(|tab| tab.id == tab_id) {
@@ -1269,6 +1651,37 @@ impl AppState {
         });
         self.set_active_tab(id);
         Task::none()
+    }
+
+    fn add_pane_to_active_tab(&mut self, pane: PaneModuleKind) {
+        let Some(tab) = self.active_tab().cloned() else {
+            return;
+        };
+        if !matches!(tab.layout, Some(TabLayout::Custom(_))) {
+            let custom_layout = custom_layout_for_tab(tab.kind);
+            if let Some(active) = self.active_tab_mut() {
+                active.layout = Some(TabLayout::Custom(custom_layout.clone()));
+            }
+            self.custom_tabs.insert(
+                tab.id.clone(),
+                pane_grid::State::with_configuration(custom_layout.to_configuration()),
+            );
+        }
+
+        let layout = if let Some(state) = self.custom_tabs.get_mut(&tab.id) {
+            let target = state.iter().next().map(|(pane, _)| *pane);
+            if let Some(target) = target {
+                let _ = state.split(pane_grid::Axis::Horizontal, target, pane);
+                Some(CustomLayout::from(state))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(layout) = layout {
+            self.set_active_tab_layout(TabLayout::Custom(layout));
+        }
     }
 
     fn delete_tab(&mut self, tab_id: String) {
@@ -1373,6 +1786,86 @@ pub enum TabKind {
 pub enum TabLayout {
     Timeline(PaneLayout),
     Replay(ReplayLayout),
+    Custom(CustomLayout),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomLayout {
+    root: CustomLayoutNode,
+}
+
+impl CustomLayout {
+    pub fn from(state: &pane_grid::State<PaneModuleKind>) -> Self {
+        Self {
+            root: CustomLayoutNode::from(state.layout(), state),
+        }
+    }
+
+    pub fn to_configuration(&self) -> pane_grid::Configuration<PaneModuleKind> {
+        self.root.to_configuration()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum CustomLayoutNode {
+    Pane(PaneModuleKind),
+    Split {
+        axis: CustomLayoutAxis,
+        ratio: f32,
+        a: Box<CustomLayoutNode>,
+        b: Box<CustomLayoutNode>,
+    },
+}
+
+impl CustomLayoutNode {
+    fn from(node: &pane_grid::Node, panes: &pane_grid::State<PaneModuleKind>) -> Self {
+        match node {
+            pane_grid::Node::Pane(pane) => {
+                let kind = panes.get(*pane).copied().unwrap_or(PaneModuleKind::RequestList);
+                CustomLayoutNode::Pane(kind)
+            }
+            pane_grid::Node::Split { axis, ratio, a, b, .. } => CustomLayoutNode::Split {
+                axis: CustomLayoutAxis::from(*axis),
+                ratio: *ratio,
+                a: Box::new(CustomLayoutNode::from(a, panes)),
+                b: Box::new(CustomLayoutNode::from(b, panes)),
+            },
+        }
+    }
+
+    fn to_configuration(&self) -> pane_grid::Configuration<PaneModuleKind> {
+        match self {
+            CustomLayoutNode::Pane(pane) => pane_grid::Configuration::Pane(*pane),
+            CustomLayoutNode::Split { axis, ratio, a, b } => pane_grid::Configuration::Split {
+                axis: axis.to_axis(),
+                ratio: *ratio,
+                a: Box::new(a.to_configuration()),
+                b: Box::new(b.to_configuration()),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum CustomLayoutAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl CustomLayoutAxis {
+    fn from(axis: pane_grid::Axis) -> Self {
+        match axis {
+            pane_grid::Axis::Horizontal => CustomLayoutAxis::Horizontal,
+            pane_grid::Axis::Vertical => CustomLayoutAxis::Vertical,
+        }
+    }
+
+    fn to_axis(self) -> pane_grid::Axis {
+        match self {
+            CustomLayoutAxis::Horizontal => pane_grid::Axis::Horizontal,
+            CustomLayoutAxis::Vertical => pane_grid::Axis::Vertical,
+        }
+    }
 }
 
 impl TabKind {
@@ -1441,10 +1934,49 @@ fn truncate_tab_label(label: &str, max_width: f32) -> String {
     format!("{truncated}{suffix}")
 }
 
+fn default_custom_layout() -> CustomLayout {
+    CustomLayout {
+        root: CustomLayoutNode::Pane(PaneModuleKind::RequestList),
+    }
+}
+
+fn custom_layout_for_tab(kind: TabKind) -> CustomLayout {
+    match kind {
+        TabKind::Timeline => CustomLayout {
+            root: CustomLayoutNode::Split {
+                axis: CustomLayoutAxis::Vertical,
+                ratio: 0.4,
+                a: Box::new(CustomLayoutNode::Pane(PaneModuleKind::RequestList)),
+                b: Box::new(CustomLayoutNode::Split {
+                    axis: CustomLayoutAxis::Horizontal,
+                    ratio: 0.5,
+                    a: Box::new(CustomLayoutNode::Pane(PaneModuleKind::RequestDetails)),
+                    b: Box::new(CustomLayoutNode::Pane(PaneModuleKind::ResponsePreview)),
+                }),
+            },
+        },
+        TabKind::Replay => CustomLayout {
+            root: CustomLayoutNode::Split {
+                axis: CustomLayoutAxis::Vertical,
+                ratio: 0.15,
+                a: Box::new(CustomLayoutNode::Pane(PaneModuleKind::ReplayList)),
+                b: Box::new(CustomLayoutNode::Split {
+                    axis: CustomLayoutAxis::Vertical,
+                    ratio: 0.5,
+                    a: Box::new(CustomLayoutNode::Pane(PaneModuleKind::ReplayEditor)),
+                    b: Box::new(CustomLayoutNode::Pane(PaneModuleKind::ResponsePreview)),
+                }),
+            },
+        },
+        _ => default_custom_layout(),
+    }
+}
+
 fn default_layout_for(kind: TabKind) -> Option<TabLayout> {
     match kind {
         TabKind::Timeline => Some(TabLayout::Timeline(default_pane_layout())),
         TabKind::Replay => Some(TabLayout::Replay(default_replay_layout())),
+        TabKind::Custom => Some(TabLayout::Custom(default_custom_layout())),
         _ => None,
     }
 }
