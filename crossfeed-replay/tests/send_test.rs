@@ -34,7 +34,7 @@ fn replay_send_records_execution() {
     let service = ReplayService::new(store);
 
     let (request, _version) = service
-        .import_from_timeline(&sample_timeline_request(), "GET /".to_string())
+        .import_from_timeline(&sample_timeline_request(), "GET /".to_string(), None)
         .unwrap();
 
     let edit = ReplayEdit {

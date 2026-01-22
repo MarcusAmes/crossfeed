@@ -26,12 +26,13 @@ impl ReplayService {
         &self,
         timeline: &TimelineRequest,
         name: String,
+        source_timeline_request_id: Option<i64>,
     ) -> Result<(ReplayRequest, ReplayVersion), ReplayError> {
         let now = Utc::now().to_rfc3339();
         let request = ReplayRequest {
             id: 0,
             collection_id: None,
-            source_timeline_request_id: None,
+            source_timeline_request_id,
             name,
             sort_index: 0,
             method: timeline.method.clone(),
@@ -137,6 +138,55 @@ impl ReplayService {
         Ok(version)
     }
 
+    pub fn apply_raw_edit(
+        &self,
+        request_id: i64,
+        raw_request: &str,
+    ) -> Result<ReplayVersion, ReplayError> {
+        let request = self
+            .store
+            .get_replay_request(request_id)
+            .map_err(ReplayError::Storage)?
+            .ok_or_else(|| ReplayError::InvalidRequest("Replay request not found".to_string()))?;
+        let edit = parse_raw_request(raw_request, &request)?;
+        self.apply_edit(&request, edit)
+    }
+
+    pub fn set_active_version(
+        &self,
+        request_id: i64,
+        version_id: i64,
+    ) -> Result<ReplayVersion, ReplayError> {
+        let version = self
+            .store
+            .get_replay_version(version_id)
+            .map_err(ReplayError::Storage)?
+            .ok_or_else(|| ReplayError::InvalidRequest("Replay version not found".to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        self.store
+            .update_replay_snapshot(request_id, &version, &now)
+            .map_err(ReplayError::Storage)?;
+        self.store
+            .update_replay_active_version(request_id, version_id, &now)
+            .map_err(ReplayError::Storage)?;
+        Ok(version)
+    }
+
+    pub fn list_child_versions(
+        &self,
+        parent_id: i64,
+    ) -> Result<Vec<ReplayVersion>, ReplayError> {
+        self.store
+            .list_replay_version_children(parent_id)
+            .map_err(ReplayError::Storage)
+    }
+
+    pub fn get_version(&self, version_id: i64) -> Result<Option<ReplayVersion>, ReplayError> {
+        self.store
+            .get_replay_version(version_id)
+            .map_err(ReplayError::Storage)
+    }
+
     pub fn record_execution(
         &self,
         replay_request_id: i64,
@@ -230,4 +280,167 @@ fn build_raw_diff(left: &str, right: &str) -> String {
         output.push_str(change.to_string().as_str());
     }
     output
+}
+
+fn parse_raw_request(raw: &str, fallback: &ReplayRequest) -> Result<ReplayEdit, ReplayError> {
+    let normalized = raw.replace("\r\n", "\n");
+    let trimmed = normalized.trim_end_matches('\n');
+    let (head, body) = trimmed
+        .split_once("\n\n")
+        .unwrap_or((trimmed, ""));
+    let mut lines = head.lines();
+    let request_line = lines
+        .next()
+        .ok_or_else(|| ReplayError::InvalidRequest("Missing request line".to_string()))?;
+    let (method, target, http_version) = parse_request_line(request_line)?;
+    let header_lines: Vec<&str> = lines.collect();
+
+    let (mut scheme, mut host, mut port, path, query) = parse_target(&target, fallback);
+    if let Some(host_header) = parse_host_header(&header_lines) {
+        host = host_header.host;
+        if let Some(header_port) = host_header.port {
+            port = header_port;
+        }
+    }
+    if scheme.is_empty() {
+        scheme = fallback.scheme.clone();
+    }
+    if host.is_empty() {
+        host = fallback.host.clone();
+    }
+    if port == 0 {
+        port = fallback.port;
+    }
+    let query_ref = if query.is_empty() { None } else { Some(query.as_str()) };
+    let url = build_url(&scheme, &host, port, &path, query_ref);
+
+    let mut header_block = String::new();
+    if !header_lines.is_empty() {
+        header_block.push_str(&header_lines.join("\r\n"));
+        header_block.push_str("\r\n");
+    }
+    let body_bytes = body.as_bytes().to_vec();
+
+    Ok(ReplayEdit {
+        method: Some(method),
+        scheme: Some(scheme),
+        host: Some(host),
+        port: Some(port),
+        path: Some(path),
+        query: Some(query).filter(|value| !value.is_empty()),
+        url: Some(url),
+        http_version: Some(http_version),
+        request_headers: Some(header_block.into_bytes()),
+        request_body: Some(body_bytes.clone()),
+        request_body_size: Some(body_bytes.len()),
+        label: None,
+    })
+}
+
+fn parse_request_line(line: &str) -> Result<(String, String, String), ReplayError> {
+    let mut parts = line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| ReplayError::InvalidRequest("Missing method".to_string()))?;
+    let target = parts
+        .next()
+        .ok_or_else(|| ReplayError::InvalidRequest("Missing target".to_string()))?;
+    let http_version = parts
+        .next()
+        .ok_or_else(|| ReplayError::InvalidRequest("Missing HTTP version".to_string()))?;
+    Ok((method.to_string(), target.to_string(), http_version.to_string()))
+}
+
+fn parse_target(target: &str, fallback: &ReplayRequest) -> (String, String, u16, String, String) {
+    if let Some(rest) = target.strip_prefix("http://") {
+        return parse_absolute_target("http", rest, 80, fallback);
+    }
+    if let Some(rest) = target.strip_prefix("https://") {
+        return parse_absolute_target("https", rest, 443, fallback);
+    }
+    let (path, query) = split_path_query(target);
+    (
+        fallback.scheme.clone(),
+        fallback.host.clone(),
+        fallback.port,
+        path,
+        query,
+    )
+}
+
+fn parse_absolute_target(
+    scheme: &str,
+    rest: &str,
+    default_port: u16,
+    fallback: &ReplayRequest,
+) -> (String, String, u16, String, String) {
+    let (host_part, path_part) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = parse_host_port(host_part, default_port);
+    let path_raw = if path_part.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{path_part}")
+    };
+    let (path, query) = split_path_query(&path_raw);
+    (
+        scheme.to_string(),
+        if host.is_empty() { fallback.host.clone() } else { host },
+        if port == 0 { fallback.port } else { port },
+        path,
+        query,
+    )
+}
+
+fn split_path_query(target: &str) -> (String, String) {
+    if let Some((path, query)) = target.split_once('?') {
+        (path.to_string(), query.to_string())
+    } else {
+        (target.to_string(), String::new())
+    }
+}
+
+fn parse_host_header(lines: &[&str]) -> Option<HostHeader> {
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("host") {
+            let value = value.trim();
+            let (host, port) = parse_host_port(value, 0);
+            return Some(HostHeader {
+                host,
+                port: if port == 0 { None } else { Some(port) },
+            });
+        }
+    }
+    None
+}
+
+fn parse_host_port(value: &str, default_port: u16) -> (String, u16) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return (String::new(), default_port);
+    }
+    if let Some((host, port_str)) = trimmed.rsplit_once(':') {
+        if let Ok(port) = port_str.parse::<u16>() {
+            return (host.to_string(), port);
+        }
+    }
+    (trimmed.to_string(), default_port)
+}
+
+fn build_url(scheme: &str, host: &str, port: u16, path: &str, query: Option<&str>) -> String {
+    let mut url = format!("{scheme}://{host}:{port}{path}");
+    if let Some(query) = query {
+        if !query.is_empty() {
+            url.push('?');
+            url.push_str(query);
+        }
+    }
+    url
+}
+
+struct HostHeader {
+    host: String,
+    port: Option<u16>,
 }

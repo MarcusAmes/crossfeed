@@ -721,6 +721,38 @@ impl SqliteStore {
             .map_err(|err| err.to_string())
     }
 
+    pub fn get_replay_version(&self, version_id: i64) -> Result<Option<ReplayVersion>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, replay_request_id, parent_id, label, created_at, method, scheme, host, port, path, query, url, http_version, request_headers, request_body, request_body_size
+                 FROM replay_versions WHERE id = ?1",
+            )
+            .map_err(|err| err.to_string())?;
+        stmt.query_row([version_id], parse_replay_version_row)
+            .optional()
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn list_replay_version_children(
+        &self,
+        parent_id: i64,
+    ) -> Result<Vec<ReplayVersion>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, replay_request_id, parent_id, label, created_at, method, scheme, host, port, path, query, url, http_version, request_headers, request_body, request_body_size
+                 FROM replay_versions WHERE parent_id = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(|err| err.to_string())?;
+        let mut rows = stmt.query([parent_id]).map_err(|err| err.to_string())?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+            results.push(parse_replay_version_row(row).map_err(|err| err.to_string())?);
+        }
+        Ok(results)
+    }
+
     pub fn get_latest_replay_execution(
         &self,
         request_id: i64,

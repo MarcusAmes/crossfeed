@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use crossfeed_storage::{ReplayCollection, ReplayRequest, ReplayVersion, TimelineResponse};
 use iced::mouse;
 use iced::widget::{
-    PaneGrid, button, column, container, mouse_area, pane_grid, text, text_editor,
+    PaneGrid, button, column, container, mouse_area, pane_grid, row, text, text_editor,
 };
-use iced::{Element, Length, Theme};
+use iced::{Alignment, Element, Length, Theme};
 use iced::font::Weight;
 use iced::widget::text_editor::Content;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ pub struct ReplayState {
     latest_response: Option<TimelineResponse>,
     active_version: Option<ReplayVersion>,
     editor_content: Content,
+    editor_snapshot: String,
 }
 
 impl Default for ReplayState {
@@ -45,6 +46,7 @@ impl Default for ReplayState {
             latest_response: None,
             active_version: None,
             editor_content: Content::with_text("GET /api/example\nHost: example.com\n\n"),
+            editor_snapshot: String::new(),
         };
         state.apply_layout(default_replay_layout());
         state
@@ -52,7 +54,12 @@ impl Default for ReplayState {
 }
 
 impl ReplayState {
-    pub fn view(&self, theme: &ThemePalette) -> Element<'_, Message> {
+    pub fn view(
+        &self,
+        theme: &ThemePalette,
+        editor_dirty: bool,
+        editor_saving: bool,
+    ) -> Element<'_, Message> {
         let grid = PaneGrid::new(&self.panes, |_, state, _| {
             let pane_content: Element<'_, Message> = match state {
                 ReplayPaneKind::List => self.request_list_view(*theme),
@@ -66,21 +73,51 @@ impl ReplayState {
                 let theme = *theme;
                 move |_| pane_border_style(theme)
             });
-            let title = state.title();
-            let title_text = text(title).size(13).style({
-                let theme = *theme;
-                move |_theme: &Theme| iced::widget::text::Style {
-                    color: Some(theme.text),
+            let title_bar = if *state == ReplayPaneKind::Editor {
+                let status = if editor_saving {
+                    Some("Saving…")
+                } else if editor_dirty {
+                    Some("Edited")
+                } else {
+                    None
+                };
+                let mut row = row![text(state.title()).size(13).style({
+                    let theme = *theme;
+                    move |_theme: &Theme| iced::widget::text::Style {
+                        color: Some(theme.text),
+                    }
+                })]
+                .align_y(Alignment::Center)
+                .spacing(8);
+                if let Some(status) = status {
+                    row = row.push(text(status).size(12).style({
+                        let theme = *theme;
+                        move |_theme: &Theme| iced::widget::text::Style {
+                            color: Some(theme.muted_text),
+                        }
+                    }));
                 }
-            });
-            pane_grid::Content::new(content).title_bar(
+                pane_grid::TitleBar::new(row)
+                    .padding(6)
+                    .style({
+                        let theme = *theme;
+                        move |_| crate::theme::menu_bar_style(theme)
+                    })
+            } else {
+                let title_text = text(state.title()).size(13).style({
+                    let theme = *theme;
+                    move |_theme: &Theme| iced::widget::text::Style {
+                        color: Some(theme.text),
+                    }
+                });
                 pane_grid::TitleBar::new(title_text)
                     .padding(6)
                     .style({
                         let theme = *theme;
                         move |_| crate::theme::menu_bar_style(theme)
-                    }),
-            )
+                    })
+            };
+            pane_grid::Content::new(content).title_bar(title_bar)
         })
         .on_drag(Message::ReplayPaneDragged)
         .on_resize(10, Message::ReplayPaneResized);
@@ -197,24 +234,27 @@ impl ReplayState {
     }
 
     fn response_view(&self, theme: ThemePalette) -> Element<'_, Message> {
-        let response = match &self.latest_response {
-            Some(response) => response,
-            None => {
-                return response_preview_placeholder("No replay execution yet", theme);
+        let content = match &self.latest_response {
+            Some(response) => {
+                let status_line = response
+                    .reason
+                    .clone()
+                    .map(|reason| format!("{} {reason}", response.status_code))
+                    .unwrap_or_else(|| response.status_code.to_string());
+                response_preview_from_bytes(
+                    status_line,
+                    &response.response_headers,
+                    &response.response_body,
+                    response.response_body_truncated,
+                    theme,
+                )
             }
+            None => response_preview_placeholder("No replay execution yet", theme),
         };
-        let status_line = response
-            .reason
-            .clone()
-            .map(|reason| format!("{} {reason}", response.status_code))
-            .unwrap_or_else(|| response.status_code.to_string());
-        response_preview_from_bytes(
-            status_line,
-            &response.response_headers,
-            &response.response_body,
-            response.response_body_truncated,
-            theme,
-        )
+        mouse_area(container(content))
+            .on_press(Message::ReplayEditorBlur)
+            .interaction(mouse::Interaction::Pointer)
+            .into()
     }
 
     pub fn select(&mut self, request_id: i64) {
@@ -223,6 +263,18 @@ impl ReplayState {
 
     pub fn apply_editor_action(&mut self, action: text_editor::Action) {
         self.editor_content.perform(action);
+    }
+
+    pub fn editor_text(&self) -> String {
+        self.editor_content.text()
+    }
+
+    pub fn editor_selection(&self) -> Option<String> {
+        self.editor_content.selection()
+    }
+
+    pub fn editor_snapshot(&self) -> &str {
+        &self.editor_snapshot
     }
 
     pub fn set_store_path(&mut self, path: PathBuf) {
@@ -271,20 +323,49 @@ impl ReplayState {
     pub fn set_active_version(&mut self, version: Option<ReplayVersion>) {
         self.active_version = version.clone();
         if let Some(version) = version {
-            let headers = String::from_utf8_lossy(&version.request_headers)
+            let target = if let Some(query) = version.query.as_ref() {
+                format!("{}?{}", version.path, query)
+            } else {
+                version.path.clone()
+            };
+            let request_line = format!("{} {} {}", version.method, target, version.http_version);
+            let mut headers = String::from_utf8_lossy(&version.request_headers)
                 .replace("\r\n", "\n")
                 .trim_end()
                 .to_string();
+            if let Some((first_line, rest)) = headers.split_once('\n') {
+                if normalize_request_line(first_line) == normalize_request_line(&request_line) {
+                    headers = rest.trim_start_matches('\n').to_string();
+                }
+            } else if normalize_request_line(&headers) == normalize_request_line(&request_line) {
+                headers.clear();
+            }
             let body = String::from_utf8_lossy(&version.request_body).to_string();
             let combined = if body.is_empty() {
-                headers
+                if headers.is_empty() {
+                    request_line
+                } else {
+                    format!("{request_line}\n{headers}")
+                }
             } else if headers.is_empty() {
-                body
+                format!("{request_line}\n\n{body}")
             } else {
-                format!("{headers}\n\n{body}")
+                format!("{request_line}\n{headers}\n\n{body}")
             };
             self.editor_content = Content::with_text(&combined);
+            self.editor_snapshot = self.editor_content.text();
+        } else {
+            self.editor_content = Content::with_text("");
+            self.editor_snapshot.clear();
         }
+    }
+
+    pub fn set_active_version_metadata(&mut self, version: ReplayVersion) {
+        self.active_version = Some(version);
+    }
+
+    pub fn set_editor_snapshot(&mut self, snapshot: String) {
+        self.editor_snapshot = snapshot;
     }
 
     pub fn set_latest_response(&mut self, response: Option<TimelineResponse>) {
@@ -320,6 +401,14 @@ impl ReplayState {
             }
         }
         None
+    }
+
+    pub fn selected_request_id(&self) -> Option<i64> {
+        self.selected_request_id
+    }
+
+    pub fn active_version(&self) -> Option<&ReplayVersion> {
+        self.active_version.as_ref()
     }
 
     pub fn snapshot_layout(&self) -> ReplayLayout {
@@ -459,4 +548,8 @@ pub fn default_replay_layout() -> ReplayLayout {
             }),
         },
     }
+}
+
+fn normalize_request_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }

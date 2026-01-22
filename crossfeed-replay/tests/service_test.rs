@@ -80,7 +80,7 @@ fn import_creates_request_and_version() {
 
     let request = sample_timeline_request();
     let (replay_request, version) = service
-        .import_from_timeline(&request, "GET /".to_string())
+        .import_from_timeline(&request, "GET /".to_string(), None)
         .unwrap();
 
     assert_eq!(replay_request.name, "GET /");
@@ -95,7 +95,7 @@ fn apply_edit_creates_new_version() {
     let service = ReplayService::new(store);
 
     let (imported_request, _version) = service
-        .import_from_timeline(&sample_timeline_request(), "GET /".to_string())
+        .import_from_timeline(&sample_timeline_request(), "GET /".to_string(), None)
         .unwrap();
     let active_request = ReplayRequest {
         id: imported_request.id,

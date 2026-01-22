@@ -2,16 +2,17 @@ use std::path::PathBuf;
 
 use crossfeed_ingest::{
     ProjectContext, ProxyRuntimeConfig, TailCursor, TailUpdate,
-    create_collection_and_add_request, create_replay_collection, create_replay_from_timeline,
-    duplicate_replay_request, get_latest_replay_execution, get_latest_replay_response,
+    apply_replay_raw_edit, create_collection_and_add_request, create_replay_from_timeline,
+    duplicate_replay_request, get_latest_replay_response,
     get_replay_active_version, list_replay_collections, list_replay_requests_in_collection,
     list_replay_requests_unassigned, move_replay_request_to_collection,
-    update_replay_collection_color, update_replay_collection_name, update_replay_collection_sort,
+    set_replay_active_version, update_replay_collection_color, update_replay_collection_name,
     update_replay_request_name, update_replay_request_sort,
     open_or_create_project, start_proxy, tail_query,
 };
 use crossfeed_storage::{ProjectConfig, ProjectPaths, SqliteStore};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use iced::event;
 use iced::mouse;
@@ -84,7 +85,6 @@ pub enum Message {
     TailTick,
     TailLoaded(Result<TailUpdate, String>),
     ProxyStarted(Result<(), String>),
-    ReplaySelect(i64),
     ReplayUpdateDetails(text_editor::Action),
     ReplayPaneDragged(pane_grid::DragEvent),
     ReplayPaneResized(pane_grid::ResizeEvent),
@@ -95,6 +95,7 @@ pub enum Message {
     ReplayListCursor(iced::Point),
     ReplayContextMenuOpen(i64),
     ReplayContextMenuClose,
+    ReplayEditorBlur,
     ReplayDuplicate(i64),
     ReplayRenamePrompt(i64),
     ReplayPromptLabel(String),
@@ -106,7 +107,6 @@ pub enum Message {
     ReplayCollectionMenuExit,
     ReplayAddToCollection(i64),
     ReplayNewCollectionPrompt(i64),
-    ReplayCreateCollection,
     ReplayCollectionMenuOpen(i64),
     ReplayCollectionMenuClose,
     ReplayCollectionRenamePrompt(i64),
@@ -115,6 +115,8 @@ pub enum Message {
     ReplayCollectionColorExit,
     ReplayCollectionSetColor(i64, Option<String>),
     ReplayCreatedFromTimeline(Result<i64, String>),
+    ReplayEditorSnapshotSaved(Result<crossfeed_storage::ReplayVersion, String>),
+    ReplayVersionActivated(Result<crossfeed_storage::ReplayVersion, String>),
     ReplayDragStart(i64, Option<i64>),
     ReplayDragHover(ReplayDropTarget),
     ReplayDragHoverClear,
@@ -234,6 +236,15 @@ pub struct AppState {
     pub replay_collection_color_open: bool,
     pub replay_collection_color_hover: bool,
     pub replay_collection_color_bridge_hover: bool,
+    pub replay_editor_dirty: bool,
+    pub replay_editor_last_edit: Option<Instant>,
+    pub replay_editor_focused: bool,
+    pub replay_editor_snapshot_pending: bool,
+    pub replay_editor_revision: u64,
+    pub replay_editor_snapshot_revision: Option<u64>,
+    pub replay_editor_snapshot_text: Option<String>,
+    pub replay_redo_target: Option<i64>,
+    pub replay_pending_undo: bool,
     pub replay_drag: Option<ReplayDragState>,
     pub replay_drag_hover: Option<ReplayDropTarget>,
 }
@@ -348,6 +359,15 @@ impl AppState {
             replay_collection_color_open: false,
             replay_collection_color_hover: false,
             replay_collection_color_bridge_hover: false,
+            replay_editor_dirty: false,
+            replay_editor_last_edit: None,
+            replay_editor_focused: false,
+            replay_editor_snapshot_pending: false,
+            replay_editor_revision: 0,
+            replay_editor_snapshot_revision: None,
+            replay_editor_snapshot_text: None,
+            replay_redo_target: None,
+            replay_pending_undo: false,
             replay_drag: None,
             replay_drag_hover: None,
         };
@@ -505,7 +525,7 @@ impl AppState {
                 Task::none()
             }
             Message::RetryProxyStart => self.retry_proxy_start(),
-            Message::TailTick => self.tail_tick(),
+            Message::TailTick => Task::batch([self.tail_tick(), self.replay_editor_tick()]),
             Message::TailLoaded(result) => {
                 if let Screen::Timeline(state) = &mut self.screen {
                     state.apply_tail_update(result);
@@ -519,15 +539,31 @@ impl AppState {
                 };
                 Task::none()
             }
-            Message::ReplaySelect(index) => {
-                self.replay_state.select(index);
-                Task::batch([
-                    self.load_replay_active_version(index),
-                    self.load_replay_response(index),
-                ])
-            }
-            Message::ReplayUpdateDetails(body) => {
-                self.replay_state.apply_editor_action(body);
+            Message::ReplayUpdateDetails(action) => {
+                let selection_before = self.replay_state.editor_selection();
+                let is_edit = action.is_edit();
+                let is_focus = matches!(action, text_editor::Action::Click(_) | text_editor::Action::Drag(_));
+                let immediate = matches!(
+                    action,
+                    text_editor::Action::Edit(text_editor::Edit::Paste(_))
+                ) || matches!(
+                    action,
+                    text_editor::Action::Edit(text_editor::Edit::Backspace | text_editor::Edit::Delete)
+                ) && selection_before.is_some();
+
+                self.replay_state.apply_editor_action(action);
+                if is_focus || is_edit {
+                    self.replay_editor_focused = true;
+                }
+                if is_edit {
+                    self.replay_editor_dirty = true;
+                    self.replay_editor_last_edit = Some(Instant::now());
+                    self.replay_editor_revision = self.replay_editor_revision.wrapping_add(1);
+                    self.replay_redo_target = None;
+                    if immediate {
+                        return self.commit_replay_editor_snapshot();
+                    }
+                }
                 Task::none()
             }
             Message::ReplayPaneDragged(event) => {
@@ -551,6 +587,60 @@ impl AppState {
             Message::ReplayActiveVersionLoaded(result) => {
                 if let Ok(version) = result {
                     self.replay_state.set_active_version(version);
+                    self.replay_editor_dirty = false;
+                    self.replay_editor_last_edit = None;
+                    self.replay_editor_snapshot_pending = false;
+                    self.replay_editor_revision = 0;
+                    self.replay_editor_snapshot_revision = None;
+                    self.replay_editor_snapshot_text = None;
+                    self.replay_redo_target = None;
+                    self.replay_pending_undo = false;
+                }
+                Task::none()
+            }
+            Message::ReplayEditorSnapshotSaved(result) => {
+                self.replay_editor_snapshot_pending = false;
+                let snapshot_revision = self.replay_editor_snapshot_revision.take();
+                let snapshot_text = self.replay_editor_snapshot_text.take();
+                match result {
+                    Ok(version) => {
+                        if snapshot_revision == Some(self.replay_editor_revision) {
+                            self.replay_state.set_active_version_metadata(version);
+                            if let Some(text) = snapshot_text {
+                                self.replay_state.set_editor_snapshot(text);
+                            }
+                            self.replay_editor_dirty = false;
+                            self.replay_editor_last_edit = None;
+                            if self.replay_pending_undo {
+                                self.replay_pending_undo = false;
+                                if let Some(parent_id) = self.replay_state.active_version().and_then(|active| active.parent_id) {
+                                    self.replay_redo_target = self.replay_state.active_version().map(|active| active.id);
+                                    return self.activate_replay_version(parent_id);
+                                }
+                            }
+                        } else {
+                            self.replay_state.set_active_version_metadata(version);
+                            if let Some(text) = snapshot_text {
+                                self.replay_state.set_editor_snapshot(text);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        self.replay_editor_last_edit = Some(Instant::now());
+                    }
+                }
+                Task::none()
+            }
+            Message::ReplayVersionActivated(result) => {
+                if let Ok(version) = result {
+                    self.replay_state.set_active_version(Some(version));
+                    self.replay_editor_dirty = false;
+                    self.replay_editor_last_edit = None;
+                    self.replay_editor_snapshot_pending = false;
+                    self.replay_editor_revision = 0;
+                    self.replay_editor_snapshot_revision = None;
+                    self.replay_editor_snapshot_text = None;
+                    self.replay_pending_undo = false;
                 }
                 Task::none()
             }
@@ -562,6 +652,9 @@ impl AppState {
             }
             Message::ReplayToggleCollection(collection_id) => {
                 self.replay_state.toggle_collection(collection_id);
+                self.replay_editor_focused = false;
+                self.replay_redo_target = None;
+                self.replay_pending_undo = false;
                 Task::none()
             }
             Message::ReplayListCursor(point) => {
@@ -579,6 +672,9 @@ impl AppState {
                     self.replay_collection_hover = false;
                     self.replay_collection_menu_hover = false;
                     self.replay_collection_bridge_hover = false;
+                    self.replay_editor_focused = false;
+                    self.replay_redo_target = None;
+                    self.replay_pending_undo = false;
                 }
                 Task::none()
             }
@@ -589,6 +685,10 @@ impl AppState {
                 self.replay_collection_hover = false;
                 self.replay_collection_menu_hover = false;
                 self.replay_collection_bridge_hover = false;
+                Task::none()
+            }
+            Message::ReplayEditorBlur => {
+                self.replay_editor_focused = false;
                 Task::none()
             }
             Message::ReplayDuplicate(request_id) => {
@@ -669,7 +769,6 @@ impl AppState {
                     text_input::move_cursor_to_end(self.replay_prompt_input_id.clone()),
                 ])
             }
-            Message::ReplayCreateCollection => self.confirm_replay_prompt(),
             Message::ReplayCollectionMenuOpen(collection_id) => {
                 if let Some(position) = self.replay_list_cursor {
                     self.replay_collection_context_menu = Some(ReplayCollectionContextMenu {
@@ -680,6 +779,9 @@ impl AppState {
                     self.replay_collection_color_open = false;
                     self.replay_collection_color_hover = false;
                     self.replay_collection_color_bridge_hover = false;
+                    self.replay_editor_focused = false;
+                    self.replay_redo_target = None;
+                    self.replay_pending_undo = false;
                 }
                 Task::none()
             }
@@ -752,6 +854,9 @@ impl AppState {
                     collection_id,
                 });
                 self.replay_state.select(request_id);
+                self.replay_editor_focused = false;
+                self.replay_redo_target = None;
+                self.replay_pending_undo = false;
                 Task::batch([
                     self.load_replay_active_version(request_id),
                     self.load_replay_response(request_id),
@@ -1253,6 +1358,12 @@ impl AppState {
             {
                 self.focus = FocusArea::Response;
             }
+            Key::Character(ch) if ch.eq_ignore_ascii_case("z") && modifiers.control() => {
+                return self.handle_replay_undo();
+            }
+            Key::Character(ch) if ch.eq_ignore_ascii_case("r") && modifiers.control() => {
+                return self.handle_replay_redo();
+            }
             _ => {}
         }
         Task::none()
@@ -1280,7 +1391,11 @@ impl AppState {
                         if matches!(active_tab.as_ref().and_then(|tab| tab.layout.as_ref()), Some(TabLayout::Custom(_))) {
                             self.custom_tab_view(TabKind::Replay, &self.theme)
                         } else {
-                            self.replay_state.view(&self.theme)
+                            self.replay_state.view(
+                                &self.theme,
+                                self.replay_editor_dirty,
+                                self.replay_editor_snapshot_pending,
+                            )
                         }
                     }
                     Some(TabKind::Custom) => self.custom_tab_view(TabKind::Custom, &self.theme),
@@ -1749,6 +1864,7 @@ impl AppState {
     fn set_active_tab(&mut self, tab_id: String) {
         self.config.active_tab_id = Some(tab_id);
         self.sync_active_tab_layout();
+        self.replay_editor_focused = false;
     }
 
     fn sync_active_tab_layout(&mut self) {
@@ -2506,6 +2622,93 @@ impl AppState {
             update_replay_collection_color(path, collection_id, color),
             |_| Message::ReplayCollectionMenuClose,
         )
+    }
+
+    fn replay_editor_tick(&mut self) -> Task<Message> {
+        if !self.replay_editor_dirty || self.replay_editor_snapshot_pending {
+            return Task::none();
+        }
+        let Some(last_edit) = self.replay_editor_last_edit else {
+            return Task::none();
+        };
+        if last_edit.elapsed() >= Duration::from_millis(800) {
+            return self.commit_replay_editor_snapshot();
+        }
+        Task::none()
+    }
+
+    fn commit_replay_editor_snapshot(&mut self) -> Task<Message> {
+        if !self.replay_editor_dirty || self.replay_editor_snapshot_pending {
+            return Task::none();
+        }
+        let Some(request_id) = self.replay_state.selected_request_id() else {
+            return Task::none();
+        };
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        let raw_text = self.replay_state.editor_text();
+        if raw_text == self.replay_state.editor_snapshot() {
+            self.replay_editor_dirty = false;
+            self.replay_editor_last_edit = None;
+            self.replay_editor_snapshot_revision = None;
+            self.replay_editor_snapshot_text = None;
+            return Task::none();
+        }
+        self.replay_editor_snapshot_pending = true;
+        self.replay_editor_snapshot_revision = Some(self.replay_editor_revision);
+        self.replay_editor_snapshot_text = Some(raw_text.clone());
+        self.replay_redo_target = None;
+        Task::perform(
+            apply_replay_raw_edit(path, request_id, raw_text),
+            Message::ReplayEditorSnapshotSaved,
+        )
+    }
+
+    fn activate_replay_version(&self, version_id: i64) -> Task<Message> {
+        let Some(request_id) = self.replay_state.selected_request_id() else {
+            return Task::none();
+        };
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        Task::perform(
+            set_replay_active_version(path, request_id, version_id),
+            Message::ReplayVersionActivated,
+        )
+    }
+
+    fn handle_replay_undo(&mut self) -> Task<Message> {
+        if !self.replay_editor_focused {
+            return Task::none();
+        }
+        if self.replay_editor_dirty {
+            self.replay_pending_undo = true;
+            return self.commit_replay_editor_snapshot();
+        }
+        let Some(active) = self.replay_state.active_version() else {
+            return Task::none();
+        };
+        let Some(parent_id) = active.parent_id else {
+            return Task::none();
+        };
+        self.replay_redo_target = Some(active.id);
+        self.activate_replay_version(parent_id)
+    }
+
+    fn handle_replay_redo(&mut self) -> Task<Message> {
+        if !self.replay_editor_focused {
+            return Task::none();
+        }
+        if self.replay_editor_dirty {
+            self.replay_pending_undo = false;
+            return self.commit_replay_editor_snapshot();
+        }
+        let Some(target) = self.replay_redo_target else {
+            return Task::none();
+        };
+        self.replay_redo_target = None;
+        self.activate_replay_version(target)
     }
 
     fn apply_replay_drag(&self, drag: ReplayDragState, target: ReplayDropTarget) -> Task<Message> {

@@ -14,13 +14,13 @@ use futures::StreamExt;
 pub use project_runtime::{ProjectContext, open_or_create_project};
 pub use proxy_runtime::{ProxyRuntimeConfig, start_proxy};
 pub use replay_runtime::{
-    create_collection_and_add_request, create_replay_collection, create_replay_from_timeline,
-    duplicate_replay_request, get_latest_replay_execution, get_latest_replay_response,
-    get_replay_active_version, get_replay_request, list_replay_collections,
-    list_replay_requests_in_collection, list_replay_requests_unassigned,
-    move_replay_request_to_collection, update_replay_collection_color,
-    update_replay_collection_name, update_replay_collection_sort,
-    update_replay_request_name, update_replay_request_sort,
+    activate_latest_replay_child, apply_replay_raw_edit, create_collection_and_add_request,
+    create_replay_collection, create_replay_from_timeline, duplicate_replay_request,
+    get_latest_replay_execution, get_latest_replay_response, get_replay_active_version,
+    get_replay_request, list_replay_collections, list_replay_requests_in_collection,
+    list_replay_requests_unassigned, move_replay_request_to_collection,
+    set_replay_active_version, update_replay_collection_color, update_replay_collection_name,
+    update_replay_collection_sort, update_replay_request_name, update_replay_request_sort,
 };
 pub use timeline_tail::{TailCursor, TailUpdate, TimelineItem, tail_query};
 

@@ -1,7 +1,10 @@
 use chrono::Utc;
 use std::path::PathBuf;
+
+use crossfeed_replay::ReplayService;
 use crossfeed_storage::{
     ReplayCollection, ReplayExecution, ReplayRequest, ReplayVersion, SqliteStore, TimelineResponse,
+    TimelineRequest,
 };
 
 pub async fn list_replay_collections(store_path: PathBuf) -> Result<Vec<ReplayCollection>, String> {
@@ -151,52 +154,62 @@ pub async fn create_replay_from_timeline(
     let summary = store
         .get_request_summary(timeline_request_id)?
         .ok_or_else(|| "Timeline request not found".to_string())?;
-    let now = Utc::now().to_rfc3339();
     let name = build_replay_name(&summary.method, &summary.path);
     let sort_index = store.next_replay_request_sort_index(None)?;
-    let request = ReplayRequest {
-        id: 0,
-        collection_id: None,
-        source_timeline_request_id: Some(timeline_request_id),
-        name,
-        sort_index,
-        method: summary.method.clone(),
-        scheme: summary.scheme.clone(),
-        host: summary.host.clone(),
-        port: summary.port,
-        path: summary.path.clone(),
-        query: summary.query.clone(),
-        url: summary.url.clone(),
-        http_version: summary.http_version.clone(),
-        request_headers: summary.request_headers.clone(),
-        request_body: summary.request_body.clone(),
-        request_body_size: summary.request_body_size,
-        active_version_id: None,
-        created_at: now.clone(),
-        updated_at: now.clone(),
-    };
-    let request_id = store.create_replay_request(&request)?;
-    let version = ReplayVersion {
-        id: 0,
-        replay_request_id: request_id,
-        parent_id: None,
-        label: "Initial import".to_string(),
-        created_at: now,
-        method: request.method.clone(),
-        scheme: request.scheme.clone(),
-        host: request.host.clone(),
-        port: request.port,
-        path: request.path.clone(),
-        query: request.query.clone(),
-        url: request.url.clone(),
-        http_version: request.http_version.clone(),
-        request_headers: request.request_headers.clone(),
-        request_body: request.request_body.clone(),
-        request_body_size: request.request_body_size,
-    };
-    let version_id = store.insert_replay_version(&version)?;
-    store.update_replay_active_version(request_id, version_id, &request.updated_at)?;
-    Ok(request_id)
+    let timeline_request: TimelineRequest = summary.into();
+    let service = ReplayService::new(store);
+    let (request, _version) = service
+        .import_from_timeline(&timeline_request, name, Some(timeline_request_id))
+        .map_err(|err| err.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    service
+        .store()
+        .update_replay_request_sort(request.id, None, sort_index, &now)?;
+    Ok(request.id)
+}
+
+pub async fn apply_replay_raw_edit(
+    store_path: PathBuf,
+    request_id: i64,
+    raw_request: String,
+) -> Result<ReplayVersion, String> {
+    let store = SqliteStore::open(store_path)?;
+    let service = ReplayService::new(store);
+    service
+        .apply_raw_edit(request_id, &raw_request)
+        .map_err(|err| err.to_string())
+}
+
+pub async fn set_replay_active_version(
+    store_path: PathBuf,
+    request_id: i64,
+    version_id: i64,
+) -> Result<ReplayVersion, String> {
+    let store = SqliteStore::open(store_path)?;
+    let service = ReplayService::new(store);
+    service
+        .set_active_version(request_id, version_id)
+        .map_err(|err| err.to_string())
+}
+
+pub async fn activate_latest_replay_child(
+    store_path: PathBuf,
+    request_id: i64,
+    parent_id: i64,
+) -> Result<Option<ReplayVersion>, String> {
+    let store = SqliteStore::open(store_path)?;
+    let service = ReplayService::new(store);
+    let children = service
+        .list_child_versions(parent_id)
+        .map_err(|err| err.to_string())?;
+    if let Some(version) = children.into_iter().next() {
+        let version = service
+            .set_active_version(request_id, version.id)
+            .map_err(|err| err.to_string())?;
+        Ok(Some(version))
+    } else {
+        Ok(None)
+    }
 }
 
 pub async fn duplicate_replay_request(

@@ -6,4 +6,6 @@ pub enum ReplayError {
     Storage(String),
     #[error("missing active version")]
     MissingActiveVersion,
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
 }
