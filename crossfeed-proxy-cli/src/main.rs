@@ -39,7 +39,7 @@ async fn main() -> Result<(), String> {
         request_max_bytes: cli.request_body_limit_mb.max(default_request_mb) * 1024 * 1024,
         response_max_bytes: cli.response_body_limit_mb.max(default_response_mb) * 1024 * 1024,
     };
-    let ingest = IngestHandle::new(Box::new(store), limits);
+    let ingest = IngestHandle::new_with_path(paths.database.clone(), Box::new(store), limits);
 
     let mut proxy_config = ProxyConfig::default();
     proxy_config.tls.ca_cert_dir = certs_dir.to_string_lossy().into_owned();

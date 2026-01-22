@@ -21,3 +21,16 @@ pub struct ReplayDiff {
     pub json: serde_json::Value,
     pub raw: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplaySendScope {
+    pub scope_status_at_capture: String,
+    pub scope_rules_version: i64,
+    pub capture_filtered: bool,
+    pub timeline_filtered: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplaySendResult {
+    pub timeline_request_id: i64,
+}

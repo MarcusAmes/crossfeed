@@ -17,7 +17,7 @@ mod retry;
 mod retry_test;
 
 pub use batch::{BatchItem, BatchRequest, BatchResponse, BatchResultStream};
-pub use client::{Client, ClientConfig, ProxyConfig, ProxyKind};
+pub use client::{CancelToken, Client, ClientConfig, ProxyConfig, ProxyKind, RequestError};
 pub use download::{DownloadResult, DownloadTarget};
 pub use rate_limit::RateLimiter;
 pub use request::{Request, RequestBuilder, RequestMethod};

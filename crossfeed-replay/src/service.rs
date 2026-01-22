@@ -2,10 +2,15 @@ use chrono::Utc;
 use similar::{ChangeTag, TextDiff};
 
 use crossfeed_storage::{
-    ReplayExecution, ReplayRequest, ReplayVersion, SqliteStore, TimelineRequest,
+    ReplayExecution, ReplayRequest, ReplayVersion, SqliteStore, TimelineRequest, TimelineResponse,
 };
+use crossfeed_storage::TimelineStore;
+use crossfeed_web::{CancelToken, Client, ClientConfig, Request as WebRequest, RequestError};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
+use std::path::Path;
+use std::time::Instant;
 
-use crate::{ReplayDiff, ReplayEdit, ReplayError};
+use crate::{ReplayDiff, ReplayEdit, ReplayError, ReplaySendResult, ReplaySendScope};
 
 pub struct ReplayService {
     store: SqliteStore,
@@ -207,6 +212,7 @@ impl ReplayService {
         Ok(execution)
     }
 
+
     pub fn diff_versions(&self, left: &ReplayVersion, right: &ReplayVersion) -> ReplayDiff {
         let json = serde_json::json!({
             "method": diff_value(&left.method, &right.method),
@@ -225,6 +231,84 @@ impl ReplayService {
         let raw = build_raw_diff(&raw_left, &raw_right);
         ReplayDiff { json, raw }
     }
+}
+
+pub async fn send_replay_request(
+    store_path: &Path,
+    request_id: i64,
+    scope: ReplaySendScope,
+    cancel: CancelToken,
+) -> Result<ReplaySendResult, ReplayError> {
+    let (version, web_request, started_at) = {
+        let store = SqliteStore::open(store_path).map_err(ReplayError::Storage)?;
+        let version = store
+            .get_replay_active_version(request_id)
+            .map_err(ReplayError::Storage)?
+            .ok_or(ReplayError::MissingActiveVersion)?;
+        let web_request = build_web_request(&version)?;
+        let started_at = Utc::now().to_rfc3339();
+        (version, web_request, started_at)
+    };
+
+    let client = Client::new(ClientConfig::default());
+    let started = Instant::now();
+    let response = client
+        .request_with_cancel(web_request, cancel)
+        .await
+        .map_err(map_request_error)?;
+    let completed_at = Utc::now().to_rfc3339();
+
+    let timeline_request = TimelineRequest {
+        source: "replay".to_string(),
+        method: version.method.clone(),
+        scheme: version.scheme.clone(),
+        host: version.host.clone(),
+        port: version.port,
+        path: version.path.clone(),
+        query: version.query.clone(),
+        url: version.url.clone(),
+        http_version: version.http_version.clone(),
+        request_headers: version.request_headers.clone(),
+        request_body: version.request_body.clone(),
+        request_body_size: version.request_body_size,
+        request_body_truncated: false,
+        started_at,
+        completed_at: Some(completed_at),
+        duration_ms: Some(started.elapsed().as_millis() as i64),
+        scope_status_at_capture: scope.scope_status_at_capture,
+        scope_status_current: None,
+        scope_rules_version: scope.scope_rules_version,
+        capture_filtered: scope.capture_filtered,
+        timeline_filtered: scope.timeline_filtered,
+    };
+    let timeline_response = TimelineResponse {
+        timeline_request_id: 0,
+        status_code: response.status,
+        reason: None,
+        response_headers: serialize_response_headers(&response.headers),
+        response_body: response.body.clone(),
+        response_body_size: response.body.len(),
+        response_body_truncated: false,
+        http_version: version.http_version.clone(),
+        received_at: Utc::now().to_rfc3339(),
+    };
+
+    let store = SqliteStore::open(store_path).map_err(ReplayError::Storage)?;
+    let timeline_request_id = store
+        .insert_request(timeline_request)
+        .map_err(ReplayError::Storage)?
+        .request_id;
+    let mut response = timeline_response;
+    response.timeline_request_id = timeline_request_id;
+    store
+        .insert_response(response)
+        .map_err(ReplayError::Storage)?;
+    let service = ReplayService::new(store);
+    service.record_execution(request_id, timeline_request_id)?;
+
+    Ok(ReplaySendResult {
+        timeline_request_id,
+    })
 }
 
 fn diff_value<T: PartialEq + serde::Serialize>(left: &T, right: &T) -> serde_json::Value {
@@ -280,6 +364,66 @@ fn build_raw_diff(left: &str, right: &str) -> String {
         output.push_str(change.to_string().as_str());
     }
     output
+}
+
+fn build_web_request(version: &ReplayVersion) -> Result<WebRequest, ReplayError> {
+    let target = if let Some(query) = version.query.as_ref() {
+        format!("{}?{}", version.path, query)
+    } else {
+        version.path.clone()
+    };
+    let uri = Uri::try_from(format!(
+        "{}://{}:{}{}",
+        version.scheme, version.host, version.port, target
+    ))
+    .map_err(|err| ReplayError::InvalidRequest(err.to_string()))?;
+    let method = Method::from_bytes(version.method.as_bytes())
+        .map_err(|err| ReplayError::InvalidRequest(err.to_string()))?;
+    let headers = parse_request_headers(&version.request_headers)?;
+    Ok(WebRequest {
+        method,
+        uri,
+        headers,
+        body: version.request_body.clone(),
+        http_version: version.http_version.clone(),
+    })
+}
+
+fn parse_request_headers(raw: &[u8]) -> Result<HeaderMap, ReplayError> {
+    let text = String::from_utf8_lossy(raw);
+    let mut headers = HeaderMap::new();
+    for line in text.lines() {
+        if let Some((name, value)) = line.split_once(':') {
+            let name = name.trim();
+            if name.eq_ignore_ascii_case("host") {
+                continue;
+            }
+            let header_name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|err| ReplayError::InvalidRequest(err.to_string()))?;
+            let header_value = HeaderValue::from_str(value.trim())
+                .map_err(|err| ReplayError::InvalidRequest(err.to_string()))?;
+            headers.append(header_name, header_value);
+        }
+    }
+    Ok(headers)
+}
+
+fn serialize_response_headers(headers: &HeaderMap) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (name, value) in headers.iter() {
+        bytes.extend_from_slice(name.as_str().as_bytes());
+        bytes.extend_from_slice(b": ");
+        bytes.extend_from_slice(value.as_bytes());
+        bytes.extend_from_slice(b"\r\n");
+    }
+    bytes
+}
+
+fn map_request_error(error: RequestError) -> ReplayError {
+    match error {
+        RequestError::Cancelled => ReplayError::Cancelled,
+        RequestError::Transport(message) => ReplayError::Network(message),
+    }
 }
 
 fn parse_raw_request(raw: &str, fallback: &ReplayRequest) -> Result<ReplayEdit, ReplayError> {

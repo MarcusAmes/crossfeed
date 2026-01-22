@@ -3,6 +3,7 @@ mod query;
 #[cfg(test)]
 mod query_test;
 mod replay;
+mod scope;
 #[cfg(test)]
 mod replay_test;
 mod schema;
@@ -20,6 +21,7 @@ pub use project::{
 };
 pub use query::{TimelineQuery, TimelineSort};
 pub use replay::{ReplayCollection, ReplayExecution, ReplayRequest, ReplayVersion};
+pub use scope::ScopeRuleRow;
 pub use schema::{SchemaCatalog, SchemaError, SchemaSpec, TableSpec};
 pub use sqlite::{FtsConfig, ResponseSummary, SqliteConfig, SqliteStore, TimelineRequestSummary};
 pub use timeline::{

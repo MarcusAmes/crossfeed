@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use crossfeed_storage::{ReplayCollection, ReplayRequest, ReplayVersion, TimelineResponse};
 use iced::mouse;
 use iced::widget::{
-    PaneGrid, button, column, container, mouse_area, pane_grid, row, text, text_editor,
+    PaneGrid, Space, button, column, container, mouse_area, pane_grid, pick_list, row, text,
+    text_editor, text_input,
 };
 use iced::{Alignment, Element, Length, Theme};
 use iced::font::Weight;
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{Message, ReplayDropTarget};
 use crate::theme::{
     ThemePalette, pane_border_style, replay_collection_header_style, replay_row_style,
-    text_editor_style, text_muted, text_primary,
+    text_editor_style, text_input_style, text_muted, text_primary,
 };
 use crate::ui::panes::{
     pane_scroll, pane_text_editor, response_preview_from_bytes, response_preview_placeholder,
@@ -32,6 +33,7 @@ pub struct ReplayState {
     active_version: Option<ReplayVersion>,
     editor_content: Content,
     editor_snapshot: String,
+    send_error: Option<(i64, String)>,
 }
 
 impl Default for ReplayState {
@@ -47,6 +49,7 @@ impl Default for ReplayState {
             active_version: None,
             editor_content: Content::with_text("GET /api/example\nHost: example.com\n\n"),
             editor_snapshot: String::new(),
+            send_error: None,
         };
         state.apply_layout(default_replay_layout());
         state
@@ -59,11 +62,18 @@ impl ReplayState {
         theme: &ThemePalette,
         editor_dirty: bool,
         editor_saving: bool,
+        send_inflight: bool,
+        send_blocked: bool,
+        scheme: &str,
+        host: &str,
+        port: &str,
     ) -> Element<'_, Message> {
         let grid = PaneGrid::new(&self.panes, |_, state, _| {
             let pane_content: Element<'_, Message> = match state {
                 ReplayPaneKind::List => self.request_list_view(*theme),
-                ReplayPaneKind::Editor => self.request_editor_view(*theme),
+                ReplayPaneKind::Editor => {
+                    self.request_editor_view(*theme, send_inflight, send_blocked, scheme, host, port)
+                }
                 ReplayPaneKind::Response => self.response_view(*theme),
             };
             let content = container(pane_content)
@@ -219,7 +229,60 @@ impl ReplayState {
             .into()
     }
 
-    pub(crate) fn request_editor_view(&self, theme: ThemePalette) -> Element<'_, Message> {
+    pub(crate) fn request_editor_view(
+        &self,
+        theme: ThemePalette,
+        send_inflight: bool,
+        send_blocked: bool,
+        scheme: &str,
+        host: &str,
+        port: &str,
+    ) -> Element<'_, Message> {
+        let schemes = vec!["http".to_string(), "https".to_string()];
+        let selected_scheme = schemes.iter().find(|value| value.as_str() == scheme).cloned();
+        let scheme_picker = pick_list(
+            schemes,
+            selected_scheme,
+            Message::ReplaySchemeChanged,
+        )
+        .padding([4, 8])
+        .width(Length::Fixed(90.0));
+        let host_input = text_input("host", host)
+            .on_input(Message::ReplayHostChanged)
+            .padding([4, 8])
+            .width(Length::FillPortion(3))
+            .style({
+                let theme = theme;
+                move |_theme, status| text_input_style(theme, status)
+            });
+        let port_input = text_input("port", port)
+            .on_input(Message::ReplayPortChanged)
+            .padding([4, 8])
+            .width(Length::Fixed(90.0))
+            .style({
+                let theme = theme;
+                move |_theme, status| text_input_style(theme, status)
+            });
+        let label = if send_inflight { "Cancel" } else { "Send" };
+        let mut send_button = button(text_primary(label.to_string(), 12, theme))
+            .padding([4, 10])
+            .style({
+                let theme = theme;
+                move |_theme, status| crate::theme::action_button_style(theme, status)
+            });
+        let can_send = self.selected_request_id.is_some()
+            && self.store_path.is_some()
+            && (!send_blocked || send_inflight);
+        if can_send {
+            send_button = send_button.on_press(if send_inflight {
+                Message::ReplaySendCancel
+            } else {
+                Message::ReplaySend
+            });
+        }
+        let header = row![scheme_picker, host_input, port_input, Space::new(Length::Fill, Length::Shrink), send_button]
+            .align_y(Alignment::Center)
+            .spacing(8);
         let editor = text_editor(&self.editor_content)
             .on_action(Message::ReplayUpdateDetails)
             .size(14)
@@ -230,12 +293,18 @@ impl ReplayState {
                 move |_theme, status| text_editor_style(theme, status)
             });
 
-        pane_text_editor(editor)
+        column![header, pane_text_editor(editor)]
+            .spacing(8)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn response_view(&self, theme: ThemePalette) -> Element<'_, Message> {
-        let content = match &self.latest_response {
-            Some(response) => {
+        let content = if let Some((request_id, error)) = &self.send_error {
+            if self.selected_request_id == Some(*request_id) {
+                response_preview_placeholder(&format!("Replay send failed: {error}"), theme)
+            } else if let Some(response) = &self.latest_response {
                 let status_line = response
                     .reason
                     .clone()
@@ -248,8 +317,24 @@ impl ReplayState {
                     response.response_body_truncated,
                     theme,
                 )
+            } else {
+                response_preview_placeholder("No replay execution yet", theme)
             }
-            None => response_preview_placeholder("No replay execution yet", theme),
+        } else if let Some(response) = &self.latest_response {
+            let status_line = response
+                .reason
+                .clone()
+                .map(|reason| format!("{} {reason}", response.status_code))
+                .unwrap_or_else(|| response.status_code.to_string());
+            response_preview_from_bytes(
+                status_line,
+                &response.response_headers,
+                &response.response_body,
+                response.response_body_truncated,
+                theme,
+            )
+        } else {
+            response_preview_placeholder("No replay execution yet", theme)
         };
         mouse_area(container(content))
             .on_press(Message::ReplayEditorBlur)
@@ -366,6 +451,10 @@ impl ReplayState {
 
     pub fn set_editor_snapshot(&mut self, snapshot: String) {
         self.editor_snapshot = snapshot;
+    }
+
+    pub fn set_send_error(&mut self, error: Option<(i64, String)>) {
+        self.send_error = error;
     }
 
     pub fn set_latest_response(&mut self, response: Option<TimelineResponse>) {

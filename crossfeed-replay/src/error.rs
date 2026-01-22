@@ -8,4 +8,8 @@ pub enum ReplayError {
     MissingActiveVersion,
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("cancelled")]
+    Cancelled,
+    #[error("network error: {0}")]
+    Network(String),
 }

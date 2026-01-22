@@ -6,6 +6,7 @@ pub struct Request {
     pub uri: Uri,
     pub headers: HeaderMap,
     pub body: Vec<u8>,
+    pub http_version: String,
 }
 
 impl Request {
@@ -20,6 +21,7 @@ pub struct RequestBuilder {
     uri: Uri,
     headers: HeaderMap,
     body: Vec<u8>,
+    http_version: String,
 }
 
 impl RequestBuilder {
@@ -29,6 +31,7 @@ impl RequestBuilder {
             uri,
             headers: HeaderMap::new(),
             body: Vec::new(),
+            http_version: "HTTP/1.1".to_string(),
         }
     }
 
@@ -47,12 +50,18 @@ impl RequestBuilder {
         self
     }
 
+    pub fn http_version(mut self, http_version: impl Into<String>) -> Self {
+        self.http_version = http_version.into();
+        self
+    }
+
     pub fn build(self) -> Request {
         Request {
             method: self.method,
             uri: self.uri,
             headers: self.headers,
             body: self.body,
+            http_version: self.http_version,
         }
     }
 }

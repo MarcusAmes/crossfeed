@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::query::{TimelineQuery, TimelineSort};
 use crate::replay::{ReplayCollection, ReplayExecution, ReplayRequest, ReplayVersion};
+use crate::scope::ScopeRuleRow;
 use crate::schema::SchemaCatalog;
 use crate::timeline::{TimelineInsertResult, TimelineRequest, TimelineResponse, TimelineStore};
 
@@ -773,6 +774,29 @@ impl SqliteStore {
         })
         .optional()
         .map_err(|err| err.to_string())
+    }
+
+    pub fn list_scope_rules(&self) -> Result<Vec<ScopeRuleRow>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, rule_type, pattern_type, target, pattern, enabled, created_at FROM scope_rules",
+            )
+            .map_err(|err| err.to_string())?;
+        let mut rows = stmt.query([]).map_err(|err| err.to_string())?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+            results.push(ScopeRuleRow {
+                id: row.get(0).map_err(|err| err.to_string())?,
+                rule_type: row.get(1).map_err(|err| err.to_string())?,
+                pattern_type: row.get(2).map_err(|err| err.to_string())?,
+                target: row.get(3).map_err(|err| err.to_string())?,
+                pattern: row.get(4).map_err(|err| err.to_string())?,
+                enabled: row.get::<_, i64>(5).map_err(|err| err.to_string())? != 0,
+                created_at: row.get(6).map_err(|err| err.to_string())?,
+            });
+        }
+        Ok(results)
     }
 
     pub fn query_request_summaries(

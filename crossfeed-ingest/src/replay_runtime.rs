@@ -1,11 +1,16 @@
 use chrono::Utc;
 use std::path::PathBuf;
 
-use crossfeed_replay::ReplayService;
+use crossfeed_replay::{
+    ReplayEdit, ReplaySendScope, ReplayService, send_replay_request as replay_send_request,
+};
 use crossfeed_storage::{
     ReplayCollection, ReplayExecution, ReplayRequest, ReplayVersion, SqliteStore, TimelineResponse,
     TimelineRequest,
 };
+use crossfeed_web::CancelToken;
+
+use crate::scope::evaluate_scope;
 
 pub async fn list_replay_collections(store_path: PathBuf) -> Result<Vec<ReplayCollection>, String> {
     let store = SqliteStore::open(store_path)?;
@@ -180,6 +185,23 @@ pub async fn apply_replay_raw_edit(
         .map_err(|err| err.to_string())
 }
 
+pub async fn apply_replay_edit(
+    store_path: PathBuf,
+    request_id: i64,
+    edit: ReplayEdit,
+) -> Result<ReplayVersion, String> {
+    let store = SqliteStore::open(store_path)?;
+    let service = ReplayService::new(store);
+    let request = service
+        .store()
+        .get_replay_request(request_id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Replay request not found".to_string())?;
+    service
+        .apply_edit(&request, edit)
+        .map_err(|err| err.to_string())
+}
+
 pub async fn set_replay_active_version(
     store_path: PathBuf,
     request_id: i64,
@@ -209,6 +231,29 @@ pub async fn activate_latest_replay_child(
         Ok(Some(version))
     } else {
         Ok(None)
+    }
+}
+
+pub async fn send_replay_request(
+    store_path: PathBuf,
+    request_id: i64,
+    cancel: CancelToken,
+) -> Result<Option<i64>, String> {
+    let store = SqliteStore::open(store_path.clone())?;
+    let version = store
+        .get_replay_active_version(request_id)?
+        .ok_or_else(|| "Missing active replay version".to_string())?;
+    let scope = evaluate_scope(&store_path, &version.host, &version.path)?;
+    let send_scope = ReplaySendScope {
+        scope_status_at_capture: scope.scope_status_at_capture,
+        scope_rules_version: scope.scope_rules_version,
+        capture_filtered: scope.capture_filtered,
+        timeline_filtered: scope.timeline_filtered,
+    };
+    match replay_send_request(&store_path, request_id, send_scope, cancel).await {
+        Ok(result) => Ok(Some(result.timeline_request_id)),
+        Err(crossfeed_replay::ReplayError::Cancelled) => Ok(None),
+        Err(err) => Err(err.to_string()),
     }
 }
 

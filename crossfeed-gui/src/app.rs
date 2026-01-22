@@ -2,14 +2,17 @@ use std::path::PathBuf;
 
 use crossfeed_ingest::{
     ProjectContext, ProxyRuntimeConfig, TailCursor, TailUpdate,
-    apply_replay_raw_edit, create_collection_and_add_request, create_replay_from_timeline,
+    ReplayEdit, apply_replay_edit, apply_replay_raw_edit,
+    create_collection_and_add_request, create_replay_from_timeline,
     duplicate_replay_request, get_latest_replay_response,
     get_replay_active_version, list_replay_collections, list_replay_requests_in_collection,
     list_replay_requests_unassigned, move_replay_request_to_collection,
-    set_replay_active_version, update_replay_collection_color, update_replay_collection_name,
+    send_replay_request, set_replay_active_version, update_replay_collection_color,
+    update_replay_collection_name,
     update_replay_request_name, update_replay_request_sort,
     open_or_create_project, start_proxy, tail_query,
 };
+use crossfeed_ingest::CancelToken;
 use crossfeed_storage::{ProjectConfig, ProjectPaths, SqliteStore};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -117,6 +120,13 @@ pub enum Message {
     ReplayCreatedFromTimeline(Result<i64, String>),
     ReplayEditorSnapshotSaved(Result<crossfeed_storage::ReplayVersion, String>),
     ReplayVersionActivated(Result<crossfeed_storage::ReplayVersion, String>),
+    ReplaySend,
+    ReplaySendCancel,
+    ReplaySendFinished(i64, Result<Option<i64>, String>),
+    ReplaySchemeChanged(String),
+    ReplayHostChanged(String),
+    ReplayPortChanged(String),
+    ReplaySchemeApply(Result<crossfeed_storage::ReplayVersion, String>),
     ReplayDragStart(i64, Option<i64>),
     ReplayDragHover(ReplayDropTarget),
     ReplayDragHoverClear,
@@ -245,6 +255,13 @@ pub struct AppState {
     pub replay_editor_snapshot_text: Option<String>,
     pub replay_redo_target: Option<i64>,
     pub replay_pending_undo: bool,
+    pub replay_send_inflight_request_id: Option<i64>,
+    pub replay_send_cancel: Option<CancelToken>,
+    pub replay_send_pending: bool,
+    pub replay_send_pending_request_id: Option<i64>,
+    pub replay_scheme: String,
+    pub replay_host: String,
+    pub replay_port: String,
     pub replay_drag: Option<ReplayDragState>,
     pub replay_drag_hover: Option<ReplayDropTarget>,
 }
@@ -368,6 +385,13 @@ impl AppState {
             replay_editor_snapshot_text: None,
             replay_redo_target: None,
             replay_pending_undo: false,
+            replay_send_inflight_request_id: None,
+            replay_send_cancel: None,
+            replay_send_pending: false,
+            replay_send_pending_request_id: None,
+            replay_scheme: "http".to_string(),
+            replay_host: String::new(),
+            replay_port: String::new(),
             replay_drag: None,
             replay_drag_hover: None,
         };
@@ -595,6 +619,11 @@ impl AppState {
                     self.replay_editor_snapshot_text = None;
                     self.replay_redo_target = None;
                     self.replay_pending_undo = false;
+                    if let Some(active) = self.replay_state.active_version() {
+                        self.replay_scheme = active.scheme.clone();
+                        self.replay_host = active.host.clone();
+                        self.replay_port = active.port.to_string();
+                    }
                 }
                 Task::none()
             }
@@ -606,6 +635,11 @@ impl AppState {
                     Ok(version) => {
                         if snapshot_revision == Some(self.replay_editor_revision) {
                             self.replay_state.set_active_version_metadata(version);
+                            if let Some(active) = self.replay_state.active_version() {
+                                self.replay_scheme = active.scheme.clone();
+                                self.replay_host = active.host.clone();
+                                self.replay_port = active.port.to_string();
+                            }
                             if let Some(text) = snapshot_text {
                                 self.replay_state.set_editor_snapshot(text);
                             }
@@ -618,8 +652,17 @@ impl AppState {
                                     return self.activate_replay_version(parent_id);
                                 }
                             }
+                            if self.replay_send_pending {
+                                self.replay_send_pending = false;
+                                return self.start_replay_send();
+                            }
                         } else {
                             self.replay_state.set_active_version_metadata(version);
+                            if let Some(active) = self.replay_state.active_version() {
+                                self.replay_scheme = active.scheme.clone();
+                                self.replay_host = active.host.clone();
+                                self.replay_port = active.port.to_string();
+                            }
                             if let Some(text) = snapshot_text {
                                 self.replay_state.set_editor_snapshot(text);
                             }
@@ -627,6 +670,7 @@ impl AppState {
                     }
                     Err(_) => {
                         self.replay_editor_last_edit = Some(Instant::now());
+                        self.replay_send_pending = false;
                     }
                 }
                 Task::none()
@@ -641,12 +685,83 @@ impl AppState {
                     self.replay_editor_snapshot_revision = None;
                     self.replay_editor_snapshot_text = None;
                     self.replay_pending_undo = false;
+                    if let Some(active) = self.replay_state.active_version() {
+                        self.replay_scheme = active.scheme.clone();
+                        self.replay_host = active.host.clone();
+                        self.replay_port = active.port.to_string();
+                    }
+                }
+                Task::none()
+            }
+            Message::ReplaySend => {
+                if self.replay_send_inflight_request_id.is_some() {
+                    return Task::none();
+                }
+                self.replay_state.set_send_error(None);
+                self.replay_send_pending_request_id = self.replay_state.selected_request_id();
+                if self.replay_editor_dirty {
+                    self.replay_send_pending = true;
+                    return self.commit_replay_editor_snapshot();
+                }
+                self.start_replay_send()
+            }
+            Message::ReplaySendCancel => {
+                if let Some(token) = &self.replay_send_cancel {
+                    token.cancel();
+                }
+                self.replay_send_inflight_request_id = None;
+                self.replay_send_cancel = None;
+                self.replay_send_pending = false;
+                self.replay_send_pending_request_id = None;
+                Task::none()
+            }
+            Message::ReplaySendFinished(request_id, result) => {
+                if self.replay_send_inflight_request_id == Some(request_id) {
+                    self.replay_send_inflight_request_id = None;
+                    self.replay_send_cancel = None;
+                    self.replay_send_pending = false;
+                    self.replay_send_pending_request_id = None;
+                }
+                match result {
+                    Ok(Some(_)) => {
+                        if let Some(selected_id) = self.replay_state.selected_request_id() {
+                            if selected_id == request_id {
+                                self.replay_state.set_send_error(None);
+                                return self.load_replay_response(selected_id);
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        // cancelled
+                    }
+                    Err(error) => {
+                        self.replay_state.set_send_error(Some((request_id, error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::ReplaySchemeChanged(value) => {
+                self.replay_scheme = value;
+                self.apply_replay_host_fields()
+            }
+            Message::ReplayHostChanged(value) => {
+                self.replay_host = value;
+                self.apply_replay_host_fields()
+            }
+            Message::ReplayPortChanged(value) => {
+                self.replay_port = value;
+                self.apply_replay_host_fields()
+            }
+            Message::ReplaySchemeApply(result) => {
+                if let Ok(version) = result {
+                    self.replay_state.set_active_version_metadata(version);
                 }
                 Task::none()
             }
             Message::ReplayResponseLoaded(result) => {
                 if let Ok(response) = result {
                     self.replay_state.set_latest_response(response);
+                    self.replay_state.set_send_error(None);
                 }
                 Task::none()
             }
@@ -1391,10 +1506,19 @@ impl AppState {
                         if matches!(active_tab.as_ref().and_then(|tab| tab.layout.as_ref()), Some(TabLayout::Custom(_))) {
                             self.custom_tab_view(TabKind::Replay, &self.theme)
                         } else {
+                            let send_inflight = self
+                                .replay_send_inflight_request_id
+                                .is_some_and(|id| Some(id) == self.replay_state.selected_request_id());
+                            let send_blocked = self.replay_send_inflight_request_id.is_some() && !send_inflight;
                             self.replay_state.view(
                                 &self.theme,
                                 self.replay_editor_dirty,
                                 self.replay_editor_snapshot_pending,
+                                send_inflight,
+                                send_blocked,
+                                &self.replay_scheme,
+                                &self.replay_host,
+                                &self.replay_port,
                             )
                         }
                     }
@@ -2069,7 +2193,22 @@ impl AppState {
                 _ => self.pane_placeholder("Replay list", theme),
             },
             PaneModuleKind::ReplayEditor => match context {
-                TabKind::Replay => self.replay_state.request_editor_view(theme),
+                TabKind::Replay => self.replay_state.request_editor_view(
+                    theme,
+                    {
+                        self.replay_send_inflight_request_id
+                            .is_some_and(|id| Some(id) == self.replay_state.selected_request_id())
+                    },
+                    {
+                        let send_inflight = self
+                            .replay_send_inflight_request_id
+                            .is_some_and(|id| Some(id) == self.replay_state.selected_request_id());
+                        self.replay_send_inflight_request_id.is_some() && !send_inflight
+                    },
+                    &self.replay_scheme,
+                    &self.replay_host,
+                    &self.replay_port,
+                ),
                 _ => self.pane_placeholder("Replay editor", theme),
             },
         }
@@ -2662,6 +2801,76 @@ impl AppState {
         Task::perform(
             apply_replay_raw_edit(path, request_id, raw_text),
             Message::ReplayEditorSnapshotSaved,
+        )
+    }
+
+    fn start_replay_send(&mut self) -> Task<Message> {
+        if self.replay_send_inflight_request_id.is_some() {
+            return Task::none();
+        }
+        let Some(request_id) = self
+            .replay_send_pending_request_id
+            .or(self.replay_state.selected_request_id())
+        else {
+            return Task::none();
+        };
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        let cancel = CancelToken::new();
+        self.replay_send_inflight_request_id = Some(request_id);
+        self.replay_send_cancel = Some(cancel.clone());
+        self.replay_send_pending = false;
+        self.replay_send_pending_request_id = None;
+        Task::perform(
+            send_replay_request(path, request_id, cancel),
+            move |result| Message::ReplaySendFinished(request_id, result),
+        )
+    }
+
+    fn apply_replay_host_fields(&mut self) -> Task<Message> {
+        if self.replay_editor_dirty
+            || self.replay_editor_snapshot_pending
+            || self.replay_send_inflight_request_id.is_some()
+        {
+            return Task::none();
+        }
+        let Some(request_id) = self.replay_state.selected_request_id() else {
+            return Task::none();
+        };
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        let scheme = self.replay_scheme.trim();
+        let host = self.replay_host.trim();
+        let port = self.replay_port.trim();
+        if scheme.is_empty() || host.is_empty() || port.is_empty() {
+            return Task::none();
+        }
+        let Ok(port) = port.parse::<u16>() else {
+            return Task::none();
+        };
+        let Some(active) = self.replay_state.active_version() else {
+            return Task::none();
+        };
+        if scheme == active.scheme && host == active.host && port == active.port {
+            return Task::none();
+        }
+        let target = if let Some(query) = active.query.as_ref() {
+            format!("{}?{}", active.path, query)
+        } else {
+            active.path.clone()
+        };
+        let edit = ReplayEdit {
+            scheme: Some(scheme.to_string()),
+            host: Some(host.to_string()),
+            port: Some(port),
+            url: Some(format!("{}://{}:{}{}", scheme, host, port, target)),
+            ..Default::default()
+        };
+        Task::perform(
+            apply_replay_edit(path, request_id, edit),
+            Message::ReplaySchemeApply,
         )
     }
 

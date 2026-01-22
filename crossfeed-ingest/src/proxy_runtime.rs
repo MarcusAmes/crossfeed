@@ -48,7 +48,11 @@ pub async fn start_proxy(
     std::fs::create_dir_all(&config.leaf_dir).map_err(|err| err.to_string())?;
 
     let store = SqliteStore::open(&context.store_path)?;
-    let ingest = IngestHandle::new(Box::new(store), config.body_limits);
+    let ingest = IngestHandle::new_with_path(
+        context.store_path.clone(),
+        Box::new(store),
+        config.body_limits,
+    );
 
     let mut proxy_config = ProxyConfig::default();
     proxy_config.listen.host = config.listen_host;

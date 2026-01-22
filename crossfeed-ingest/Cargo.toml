@@ -9,6 +9,7 @@ crossfeed-net = { path = "../crossfeed-net" }
 crossfeed-proxy = { path = "../crossfeed-proxy" }
 crossfeed-replay = { path = "../crossfeed-replay" }
 crossfeed-storage = { path = "../crossfeed-storage" }
+crossfeed-web = { path = "../crossfeed-web" }
 futures = "0.3"
 tokio = { version = "1.37", features = ["rt-multi-thread", "macros"] }
 
