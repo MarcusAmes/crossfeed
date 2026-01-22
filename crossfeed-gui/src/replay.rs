@@ -119,12 +119,16 @@ impl ReplayState {
                 .style({
                     let theme = theme;
                     let is_open = !is_collapsed;
-                    move |_theme, status| replay_collection_header_style(theme, status, is_open)
+                    let color = collection.color.clone();
+                    move |_theme, status| {
+                        replay_collection_header_style(theme, status, is_open, color.as_deref())
+                    }
                 });
             let header_area = mouse_area(header)
                 .on_enter(Message::ReplayDragHover(ReplayDropTarget::Collection {
                     collection_id: Some(collection.id),
                 }))
+                .on_right_press(Message::ReplayCollectionMenuOpen(collection.id))
                 .interaction(mouse::Interaction::Pointer);
             list = list.push(header_area);
 
@@ -156,7 +160,7 @@ impl ReplayState {
                 .padding([4, 6])
                 .style({
                     let theme = theme;
-                    move |_theme, status| replay_collection_header_style(theme, status, true)
+                    move |_theme, status| replay_collection_header_style(theme, status, true, None)
                 });
             let header_area = mouse_area(header)
                 .on_enter(Message::ReplayDragHover(ReplayDropTarget::Collection {
@@ -240,6 +244,13 @@ impl ReplayState {
 
     pub fn collections(&self) -> &[ReplayCollection] {
         &self.collections
+    }
+
+    pub fn collection_name(&self, collection_id: i64) -> Option<String> {
+        self.collections
+            .iter()
+            .find(|collection| collection.id == collection_id)
+            .map(|collection| collection.name.clone())
     }
 
     pub fn requests_in_collection(&self, collection_id: Option<i64>) -> Option<&Vec<ReplayRequest>> {

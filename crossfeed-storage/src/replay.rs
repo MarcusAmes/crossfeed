@@ -5,6 +5,7 @@ pub struct ReplayCollection {
     pub id: i64,
     pub name: String,
     pub sort_index: i64,
+    pub color: Option<String>,
     pub created_at: String,
 }
 

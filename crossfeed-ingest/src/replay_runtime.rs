@@ -65,6 +65,24 @@ pub async fn update_replay_request_name(
     store.update_replay_request_name(request_id, &name, &now)
 }
 
+pub async fn update_replay_collection_name(
+    store_path: PathBuf,
+    collection_id: i64,
+    name: String,
+) -> Result<(), String> {
+    let store = SqliteStore::open(store_path)?;
+    store.update_replay_collection_name(collection_id, &name)
+}
+
+pub async fn update_replay_collection_color(
+    store_path: PathBuf,
+    collection_id: i64,
+    color: Option<String>,
+) -> Result<(), String> {
+    let store = SqliteStore::open(store_path)?;
+    store.update_replay_collection_color(collection_id, color.as_deref())
+}
+
 pub async fn create_replay_collection(
     store_path: PathBuf,
     name: String,
@@ -72,7 +90,7 @@ pub async fn create_replay_collection(
     let store = SqliteStore::open(store_path)?;
     let now = Utc::now().to_rfc3339();
     let sort_index = store.next_replay_collection_sort_index()?;
-    store.create_replay_collection(&name, sort_index, &now)
+    store.create_replay_collection(&name, sort_index, None, &now)
 }
 
 pub async fn create_collection_and_add_request(
@@ -83,7 +101,7 @@ pub async fn create_collection_and_add_request(
     let store = SqliteStore::open(store_path)?;
     let now = Utc::now().to_rfc3339();
     let sort_index = store.next_replay_collection_sort_index()?;
-    let collection_id = store.create_replay_collection(&name, sort_index, &now)?;
+    let collection_id = store.create_replay_collection(&name, sort_index, None, &now)?;
     let request_sort = store.next_replay_request_sort_index(Some(collection_id))?;
     store.update_replay_request_sort(request_id, Some(collection_id), request_sort, &now)?;
     Ok(collection_id)

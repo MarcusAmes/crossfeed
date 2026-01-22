@@ -352,8 +352,15 @@ pub fn replay_collection_header_style(
     theme: ThemePalette,
     status: iced::widget::button::Status,
     is_open: bool,
+    color: Option<&str>,
 ) -> iced::widget::button::Style {
-    let base = if is_open { theme.accent } else { theme.surface };
+    let base = if is_open {
+        color
+            .map(|value| parse_hex_color(value, theme.accent))
+            .unwrap_or(theme.accent)
+    } else {
+        theme.surface
+    };
     let background = match status {
         iced::widget::button::Status::Hovered => theme.header,
         iced::widget::button::Status::Pressed => theme.accent,

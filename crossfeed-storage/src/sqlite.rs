@@ -122,6 +122,7 @@ impl SqliteStore {
             "sort_index",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        self.ensure_column("replay_collections", "color", "TEXT")?;
         self.ensure_column(
             "replay_requests",
             "sort_index",
@@ -445,7 +446,9 @@ impl SqliteStore {
     pub fn list_replay_collections(&self) -> Result<Vec<ReplayCollection>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, sort_index, created_at FROM replay_collections ORDER BY sort_index DESC")
+            .prepare(
+                "SELECT id, name, sort_index, color, created_at FROM replay_collections ORDER BY sort_index DESC",
+            )
             .map_err(|err| err.to_string())?;
         let mut rows = stmt.query([]).map_err(|err| err.to_string())?;
         let mut results = Vec::new();
@@ -454,7 +457,8 @@ impl SqliteStore {
                 id: row.get(0).map_err(|err| err.to_string())?,
                 name: row.get(1).map_err(|err| err.to_string())?,
                 sort_index: row.get(2).map_err(|err| err.to_string())?,
-                created_at: row.get(3).map_err(|err| err.to_string())?,
+                color: row.get(3).map_err(|err| err.to_string())?,
+                created_at: row.get(4).map_err(|err| err.to_string())?,
             });
         }
         Ok(results)
@@ -521,11 +525,45 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn create_replay_collection(&self, name: &str, sort_index: i64, created_at: &str) -> Result<i64, String> {
+    pub fn update_replay_collection_name(
+        &self,
+        collection_id: i64,
+        name: &str,
+    ) -> Result<(), String> {
         self.conn
             .execute(
-                "INSERT INTO replay_collections (name, sort_index, created_at) VALUES (?1, ?2, ?3)",
-                params![name, sort_index, created_at],
+                "UPDATE replay_collections SET name = ?1 WHERE id = ?2",
+                params![name, collection_id],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_replay_collection_color(
+        &self,
+        collection_id: i64,
+        color: Option<&str>,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE replay_collections SET color = ?1 WHERE id = ?2",
+                params![color, collection_id],
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    pub fn create_replay_collection(
+        &self,
+        name: &str,
+        sort_index: i64,
+        color: Option<&str>,
+        created_at: &str,
+    ) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO replay_collections (name, sort_index, color, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![name, sort_index, color, created_at],
             )
             .map_err(|err| err.to_string())?;
         Ok(self.conn.last_insert_rowid())

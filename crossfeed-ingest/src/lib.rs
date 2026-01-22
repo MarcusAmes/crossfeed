@@ -18,7 +18,8 @@ pub use replay_runtime::{
     duplicate_replay_request, get_latest_replay_execution, get_latest_replay_response,
     get_replay_active_version, get_replay_request, list_replay_collections,
     list_replay_requests_in_collection, list_replay_requests_unassigned,
-    move_replay_request_to_collection, update_replay_collection_sort,
+    move_replay_request_to_collection, update_replay_collection_color,
+    update_replay_collection_name, update_replay_collection_sort,
     update_replay_request_name, update_replay_request_sort,
 };
 pub use timeline_tail::{TailCursor, TailUpdate, TimelineItem, tail_query};

@@ -113,6 +113,7 @@ impl SchemaCatalog {
     id INTEGER PRIMARY KEY,\
     name TEXT NOT NULL,\
     sort_index INTEGER NOT NULL DEFAULT 0,\
+    color TEXT,\
     created_at TEXT NOT NULL\
 )"
                     .to_string(),

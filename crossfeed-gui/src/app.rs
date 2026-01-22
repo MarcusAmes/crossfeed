@@ -6,7 +6,8 @@ use crossfeed_ingest::{
     duplicate_replay_request, get_latest_replay_execution, get_latest_replay_response,
     get_replay_active_version, list_replay_collections, list_replay_requests_in_collection,
     list_replay_requests_unassigned, move_replay_request_to_collection,
-    update_replay_collection_sort, update_replay_request_name, update_replay_request_sort,
+    update_replay_collection_color, update_replay_collection_name, update_replay_collection_sort,
+    update_replay_request_name, update_replay_request_sort,
     open_or_create_project, start_proxy, tail_query,
 };
 use crossfeed_storage::{ProjectConfig, ProjectPaths, SqliteStore};
@@ -106,6 +107,13 @@ pub enum Message {
     ReplayAddToCollection(i64),
     ReplayNewCollectionPrompt(i64),
     ReplayCreateCollection,
+    ReplayCollectionMenuOpen(i64),
+    ReplayCollectionMenuClose,
+    ReplayCollectionRenamePrompt(i64),
+    ReplayCollectionColorMenuHover(bool),
+    ReplayCollectionColorBridgeHover(bool),
+    ReplayCollectionColorExit,
+    ReplayCollectionSetColor(i64, Option<String>),
     ReplayCreatedFromTimeline(Result<i64, String>),
     ReplayDragStart(i64, Option<i64>),
     ReplayDragHover(ReplayDropTarget),
@@ -215,6 +223,7 @@ pub struct AppState {
     pub timeline_context_menu: Option<TimelineContextMenu>,
     pub replay_list_cursor: Option<Point>,
     pub replay_context_menu: Option<ReplayContextMenu>,
+    pub replay_collection_context_menu: Option<ReplayCollectionContextMenu>,
     pub replay_prompt_label: String,
     pub replay_prompt_mode: Option<ReplayPromptMode>,
     pub replay_prompt_input_id: text_input::Id,
@@ -222,6 +231,9 @@ pub struct AppState {
     pub replay_collection_hover: bool,
     pub replay_collection_menu_hover: bool,
     pub replay_collection_bridge_hover: bool,
+    pub replay_collection_color_open: bool,
+    pub replay_collection_color_hover: bool,
+    pub replay_collection_color_bridge_hover: bool,
     pub replay_drag: Option<ReplayDragState>,
     pub replay_drag_hover: Option<ReplayDropTarget>,
 }
@@ -248,6 +260,12 @@ pub struct TabDragState {
 #[derive(Debug, Clone)]
 pub struct ReplayContextMenu {
     pub request_id: i64,
+    pub position: Point,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayCollectionContextMenu {
+    pub collection_id: i64,
     pub position: Point,
 }
 
@@ -278,6 +296,7 @@ pub struct TimelineContextMenu {
 pub enum ReplayPromptMode {
     Rename(i64),
     NewCollection(i64),
+    RenameCollection(i64),
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +337,7 @@ impl AppState {
             timeline_context_menu: None,
             replay_list_cursor: None,
             replay_context_menu: None,
+            replay_collection_context_menu: None,
             replay_prompt_label: String::new(),
             replay_prompt_mode: None,
             replay_prompt_input_id: text_input::Id::unique(),
@@ -325,6 +345,9 @@ impl AppState {
             replay_collection_hover: false,
             replay_collection_menu_hover: false,
             replay_collection_bridge_hover: false,
+            replay_collection_color_open: false,
+            replay_collection_color_hover: false,
+            replay_collection_color_bridge_hover: false,
             replay_drag: None,
             replay_drag_hover: None,
         };
@@ -551,6 +574,7 @@ impl AppState {
                         request_id,
                         position: replay_list_to_window(position),
                     });
+                    self.replay_collection_context_menu = None;
                     self.replay_collection_menu_open = false;
                     self.replay_collection_hover = false;
                     self.replay_collection_menu_hover = false;
@@ -560,6 +584,7 @@ impl AppState {
             }
             Message::ReplayContextMenuClose => {
                 self.replay_context_menu = None;
+                self.replay_collection_context_menu = None;
                 self.replay_collection_menu_open = false;
                 self.replay_collection_hover = false;
                 self.replay_collection_menu_hover = false;
@@ -645,6 +670,66 @@ impl AppState {
                 ])
             }
             Message::ReplayCreateCollection => self.confirm_replay_prompt(),
+            Message::ReplayCollectionMenuOpen(collection_id) => {
+                if let Some(position) = self.replay_list_cursor {
+                    self.replay_collection_context_menu = Some(ReplayCollectionContextMenu {
+                        collection_id,
+                        position: replay_list_to_window(position),
+                    });
+                    self.replay_context_menu = None;
+                    self.replay_collection_color_open = false;
+                    self.replay_collection_color_hover = false;
+                    self.replay_collection_color_bridge_hover = false;
+                }
+                Task::none()
+            }
+            Message::ReplayCollectionMenuClose => {
+                self.replay_collection_context_menu = None;
+                self.replay_collection_color_open = false;
+                self.replay_collection_color_hover = false;
+                self.replay_collection_color_bridge_hover = false;
+                Task::none()
+            }
+            Message::ReplayCollectionRenamePrompt(collection_id) => {
+                self.replay_collection_context_menu = None;
+                self.replay_prompt_label = self
+                    .replay_state
+                    .collection_name(collection_id)
+                    .unwrap_or_default();
+                self.replay_prompt_mode = Some(ReplayPromptMode::RenameCollection(collection_id));
+                Task::batch([
+                    text_input::focus(self.replay_prompt_input_id.clone()),
+                    text_input::move_cursor_to_end(self.replay_prompt_input_id.clone()),
+                ])
+            }
+            Message::ReplayCollectionColorMenuHover(hovered) => {
+                self.replay_collection_color_hover = hovered;
+                if hovered {
+                    self.replay_collection_color_open = true;
+                }
+                Task::none()
+            }
+            Message::ReplayCollectionColorBridgeHover(hovered) => {
+                self.replay_collection_color_bridge_hover = hovered;
+                if hovered {
+                    self.replay_collection_color_open = true;
+                }
+                Task::none()
+            }
+            Message::ReplayCollectionColorExit => {
+                self.replay_collection_color_open = false;
+                self.replay_collection_color_hover = false;
+                self.replay_collection_color_bridge_hover = false;
+                Task::none()
+            }
+            Message::ReplayCollectionSetColor(collection_id, color) => {
+                self.replay_collection_context_menu = None;
+                self.replay_collection_color_open = false;
+                Task::batch([
+                    self.update_replay_collection_color(collection_id, color),
+                    self.load_replay_list(),
+                ])
+            }
             Message::ReplayCreatedFromTimeline(result) => {
                 if let Ok(request_id) = result {
                     self.replay_state.select(request_id);
@@ -1057,14 +1142,13 @@ impl AppState {
     }
 
     fn handle_key(&mut self, key: keyboard::Key, modifiers: Modifiers) -> Task<Message> {
-        if self.tab_prompt_mode.is_some() {
+        if self.tab_prompt_mode.is_some() || self.replay_prompt_mode.is_some() {
             match key {
                 Key::Named(keyboard::key::Named::Enter) => {
-                    return self.confirm_tab_prompt();
+                    return self.confirm_active_prompt();
                 }
                 Key::Named(keyboard::key::Named::Escape) => {
-                    self.tab_prompt_mode = None;
-                    return Task::none();
+                    return self.cancel_active_prompt();
                 }
                 _ => {}
             }
@@ -1111,6 +1195,13 @@ impl AppState {
                     self.replay_collection_hover = false;
                     self.replay_collection_menu_hover = false;
                     self.replay_collection_bridge_hover = false;
+                    return Task::none();
+                }
+                if self.replay_collection_context_menu.is_some() {
+                    self.replay_collection_context_menu = None;
+                    self.replay_collection_color_open = false;
+                    self.replay_collection_color_hover = false;
+                    self.replay_collection_color_bridge_hover = false;
                     return Task::none();
                 }
                 if self.timeline_context_menu.is_some() {
@@ -1230,6 +1321,9 @@ impl AppState {
         }
         if let Some(replay_menu) = self.replay_context_menu_overlay() {
             layers.push(replay_menu);
+        }
+        if let Some(collection_menu) = self.replay_collection_context_menu_overlay() {
+            layers.push(collection_menu);
         }
         if let Some(prompt) = self.replay_prompt_view() {
             layers.push(prompt);
@@ -1568,39 +1662,17 @@ impl AppState {
             TabPromptMode::New => "Create",
             TabPromptMode::Rename(_) => "Save",
         };
-        let prompt = container(
-            column![
-                text_primary(title, 16, self.theme),
-                text_input("Tab name", &self.tab_prompt_label)
-                    .id(self.tab_prompt_input_id.clone())
-                    .on_input(Message::UpdateNewTabLabel)
-                    .padding(8)
-                    .style({
-                        let theme = self.theme;
-                        move |_theme, status| text_input_style(theme, status)
-                    }),
-                row![
-                    action_button(confirm_label, Message::ConfirmTabPrompt, self.theme),
-                    action_button("Cancel", Message::CancelTabPrompt, self.theme),
-                ]
-                .spacing(12),
-            ]
-            .spacing(12),
-        )
-        .padding(16)
-        .style({
-            let theme = self.theme;
-            move |_| menu_panel_style(theme)
-        });
-
-        Some(
-            container(prompt)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center)
-                .into(),
-        )
+        Some(prompt_overlay(
+            title,
+            "Tab name",
+            &self.tab_prompt_label,
+            self.tab_prompt_input_id.clone(),
+            Message::UpdateNewTabLabel,
+            confirm_label,
+            Message::ConfirmTabPrompt,
+            Message::CancelTabPrompt,
+            self.theme,
+        ))
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -2055,6 +2127,127 @@ impl AppState {
         Some(container(overlay).width(Length::Fill).height(Length::Fill).into())
     }
 
+    fn replay_collection_context_menu_overlay<'a>(&'a self) -> Option<Element<'a, Message>> {
+        let menu = self.replay_collection_context_menu.as_ref()?;
+        let mut items = column![].spacing(6);
+
+        let rename = iced::widget::button(text("Rename collection").size(12).color(self.theme.text))
+            .on_press(Message::ReplayCollectionRenamePrompt(menu.collection_id))
+            .padding([4, 10])
+            .width(Length::Fill)
+            .style({
+                let theme = self.theme;
+                move |_theme, status| menu_item_button_style(theme, status, true)
+            });
+
+        let color_label = row![
+            text("Set Color").size(12).color(self.theme.text),
+            Space::new(Length::Fill, Length::Shrink),
+            text("▶").size(10).color(self.theme.muted_text),
+        ]
+        .align_y(Alignment::Center);
+        let color_button = iced::widget::button(color_label)
+            .padding([4, 10])
+            .width(Length::Fill)
+            .style({
+                let theme = self.theme;
+                move |_theme, status| menu_item_button_style(theme, status, true)
+            });
+        let color_area = mouse_area(color_button)
+            .on_enter(Message::ReplayCollectionColorMenuHover(true))
+            .on_exit(Message::ReplayCollectionColorMenuHover(false))
+            .interaction(mouse::Interaction::Pointer);
+
+        items = items.push(rename).push(color_area);
+
+        let panel = container(items)
+            .padding(8)
+            .width(Length::Fixed(220.0))
+            .style({
+                let theme = self.theme;
+                move |_| menu_panel_style(theme)
+            });
+
+        let mut region: Element<'a, Message> = panel.into();
+        if self.replay_collection_color_open {
+            let color_items = vec![
+                ("Red", "#cc241d"),
+                ("Orange", "#d65d0e"),
+                ("Yellow", "#d79921"),
+                ("Green", "#98971a"),
+                ("Blue", "#458588"),
+                ("Indigo", "#076678"),
+                ("Violet", "#b16286"),
+            ];
+            let mut submenu_content = column![].spacing(6);
+            for (label, hex) in color_items {
+                let button = iced::widget::button(text(label).size(12).color(self.theme.text))
+                    .on_press(Message::ReplayCollectionSetColor(
+                        menu.collection_id,
+                        Some(hex.to_string()),
+                    ))
+                    .padding([4, 10])
+                    .width(Length::Fill)
+                    .style({
+                        let theme = self.theme;
+                        move |_theme, status| menu_item_button_style(theme, status, true)
+                    });
+                submenu_content = submenu_content.push(button);
+            }
+            let clear_button = iced::widget::button(text("Default").size(12).color(self.theme.text))
+                .on_press(Message::ReplayCollectionSetColor(menu.collection_id, None))
+                .padding([4, 10])
+                .width(Length::Fill)
+                .style({
+                    let theme = self.theme;
+                    move |_theme, status| menu_item_button_style(theme, status, true)
+                });
+            submenu_content = submenu_content.push(clear_button);
+
+            let submenu = container(submenu_content)
+                .padding(8)
+                .width(Length::Fixed(200.0))
+                .style({
+                    let theme = self.theme;
+                    move |_| menu_panel_style(theme)
+                });
+            region = submenu_region(
+                region,
+                submenu.into(),
+                VIEW_SUBMENU_GAP,
+                Message::ReplayCollectionColorMenuHover(true),
+                Message::ReplayCollectionColorMenuHover(false),
+                Message::ReplayCollectionColorBridgeHover(true),
+                Message::ReplayCollectionColorBridgeHover(false),
+                Message::ReplayCollectionColorExit,
+            );
+        }
+
+        let backdrop = mouse_area(container(Space::new(Length::Fill, Length::Fill)))
+            .on_press(Message::ReplayCollectionMenuClose)
+            .on_right_press(Message::ReplayCollectionMenuClose)
+            .interaction(mouse::Interaction::Pointer);
+
+        let overlay = stack(vec![
+            backdrop.into(),
+            container(column![
+                Space::new(Length::Shrink, Length::Fixed(menu.position.y)),
+                row![
+                    Space::new(Length::Fixed(menu.position.x), Length::Shrink),
+                    region
+                ]
+                .align_y(Alignment::Start)
+            ])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Start)
+            .align_y(Alignment::Start)
+            .into(),
+        ]);
+
+        Some(container(overlay).width(Length::Fill).height(Length::Fill).into())
+    }
+
     fn timeline_context_menu_overlay<'a>(&'a self) -> Option<Element<'a, Message>> {
         let menu = self.timeline_context_menu.as_ref()?;
         let panel = container(
@@ -2107,44 +2300,24 @@ impl AppState {
         let title = match mode {
             ReplayPromptMode::Rename(_) => "Rename replay request",
             ReplayPromptMode::NewCollection(_) => "New collection",
+            ReplayPromptMode::RenameCollection(_) => "Rename collection",
         };
         let confirm_label = match mode {
             ReplayPromptMode::Rename(_) => "Save",
             ReplayPromptMode::NewCollection(_) => "Create",
+            ReplayPromptMode::RenameCollection(_) => "Save",
         };
-        let prompt = container(
-            column![
-                text_primary(title, 16, self.theme),
-                text_input("Name", &self.replay_prompt_label)
-                    .id(self.replay_prompt_input_id.clone())
-                    .on_input(Message::ReplayPromptLabel)
-                    .padding(8)
-                    .style({
-                        let theme = self.theme;
-                        move |_theme, status| text_input_style(theme, status)
-                    }),
-                row![
-                    action_button(confirm_label, Message::ReplayPromptConfirm, self.theme),
-                    action_button("Cancel", Message::ReplayPromptCancel, self.theme),
-                ]
-                .spacing(12),
-            ]
-            .spacing(12),
-        )
-        .padding(16)
-        .style({
-            let theme = self.theme;
-            move |_| menu_panel_style(theme)
-        });
-
-        Some(
-            container(prompt)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center)
-                .into(),
-        )
+        Some(prompt_overlay(
+            title,
+            "Name",
+            &self.replay_prompt_label,
+            self.replay_prompt_input_id.clone(),
+            Message::ReplayPromptLabel,
+            confirm_label,
+            Message::ReplayPromptConfirm,
+            Message::ReplayPromptCancel,
+            self.theme,
+        ))
     }
 
     fn confirm_tab_prompt(&mut self) -> Task<Message> {
@@ -2172,6 +2345,28 @@ impl AppState {
                     tab.label = label.to_string();
                 }
             }
+        }
+        Task::none()
+    }
+
+    fn confirm_active_prompt(&mut self) -> Task<Message> {
+        if self.tab_prompt_mode.is_some() {
+            return self.confirm_tab_prompt();
+        }
+        if self.replay_prompt_mode.is_some() {
+            return self.confirm_replay_prompt();
+        }
+        Task::none()
+    }
+
+    fn cancel_active_prompt(&mut self) -> Task<Message> {
+        if self.tab_prompt_mode.is_some() {
+            self.tab_prompt_mode = None;
+            return Task::none();
+        }
+        if self.replay_prompt_mode.is_some() {
+            self.replay_prompt_mode = None;
+            return Task::none();
         }
         Task::none()
     }
@@ -2289,7 +2484,28 @@ impl AppState {
                 ),
                 self.load_replay_list(),
             ]),
+            ReplayPromptMode::RenameCollection(collection_id) => Task::batch([
+                Task::perform(
+                    update_replay_collection_name(path, collection_id, label.to_string()),
+                    |_| Message::ReplayCollectionMenuClose,
+                ),
+                self.load_replay_list(),
+            ]),
         }
+    }
+
+    fn update_replay_collection_color(
+        &self,
+        collection_id: i64,
+        color: Option<String>,
+    ) -> Task<Message> {
+        let Some(path) = self.replay_state.store_path().cloned() else {
+            return Task::none();
+        };
+        Task::perform(
+            update_replay_collection_color(path, collection_id, color),
+            |_| Message::ReplayCollectionMenuClose,
+        )
     }
 
     fn apply_replay_drag(&self, drag: ReplayDragState, target: ReplayDropTarget) -> Task<Message> {
@@ -2726,6 +2942,63 @@ fn submenu_region<'a>(
     mouse_area(region)
         .on_exit(on_region_exit)
         .interaction(mouse::Interaction::Pointer)
+        .into()
+}
+
+fn prompt_overlay<'a>(
+    title: &str,
+    input_placeholder: &str,
+    value: &str,
+    input_id: text_input::Id,
+    on_input: fn(String) -> Message,
+    confirm_label: &str,
+    confirm: Message,
+    cancel: Message,
+    theme: ThemePalette,
+) -> Element<'a, Message> {
+    let prompt = container(
+        column![
+            text_primary(title.to_string(), 16, theme),
+            text_input(input_placeholder, value)
+                .id(input_id)
+                .on_input(on_input)
+                .padding(8)
+                .style({
+                    let theme = theme;
+                    move |_theme, status| text_input_style(theme, status)
+                }),
+            row![
+                action_button(confirm_label, confirm.clone(), theme),
+                action_button("Cancel", cancel.clone(), theme),
+            ]
+            .spacing(12),
+        ]
+        .spacing(12),
+    )
+    .padding(16)
+    .style({
+        let theme = theme;
+        move |_| menu_panel_style(theme)
+    });
+
+    let backdrop = mouse_area(container(Space::new(Length::Fill, Length::Fill)))
+        .on_press(cancel.clone())
+        .on_right_press(cancel)
+        .interaction(mouse::Interaction::Pointer);
+
+    let overlay = stack(vec![
+        backdrop.into(),
+        container(prompt)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .into(),
+    ]);
+
+    container(overlay)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
 }
 
